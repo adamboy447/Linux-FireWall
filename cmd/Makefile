@@ -1,17 +1,15 @@
-TARGET := uapp
-INCLUDES := -I. -Iinclude -I../common/include
-SRCS = ../common/exchange.c ../common/tools.c ../common/helper.c kernel.c main.c
-CC := gcc
-OBJS = $(SRCS:.c=.o)
+CC      ?= gcc
+CFLAGS  ?= -O2 -g
+CFLAGS  += -Wall -Wextra -I../include
+LDFLAGS ?=
 
-$(TARGET):$(OBJS)
-	$(CC) -o $@ $^
-	rm -rf $(SRCS:.c=.o)
-%.o:%.c
-	$(CC) $(INCLUDES) -o $@ -c $<
+uapp: main.o nl.o util.o
+	$(CC) $(LDFLAGS) -o $@ $^
 
-install:
-	cp $(TARGET) ..
+%.o: %.c uapp.h ../include/fw_proto.h
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -rf $(basename $(TARGET)) $(SRCS:.c=.o)
+	rm -f uapp *.o
+
+.PHONY: clean

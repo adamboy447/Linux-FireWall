@@ -1,0 +1,361 @@
+E2E_BEGIN
+
+======== 0. topology ========
+  $ uname -r
+      6.17.0-42-generic
+  $ ip -br addr
+      lo               UNKNOWN        127.0.0.1/8 ::1/128 
+      r1@if3           UP             10.0.1.1/24 fe80::e897:5cff:fe73:6749/64 
+      r2@if5           UP             10.0.2.1/24 fe80::b818:c6ff:fe44:845c/64 
+  [PASS] baseline without firewall: client -> server tcp/80
+        OK 32 bytes echoed intact, local 10.0.1.2:39996
+
+======== 1. load the module ========
+  [PASS] insmod myfw.ko (short udp/icmp timeouts for the test)
+        
+  [PASS] uapp status works
+        myfw module         loaded (protocol v2)
+        default action      ACCEPT
+        filter rules        0
+        NAT rules           0
+        connections         0 / 16384
+        log entries         0 / 1000
+        timeouts            tcp 300s, udp 5s, icmp 5s
+        packets             0 new accepted, 0 dropped, 0 stateful, 0 NATed
+  $ sh -c dmesg | grep myfw
+      [    6.631710] myfw: loading out-of-tree module taints kernel.
+      [    6.631950] myfw: module verification failed: signature and/or required key missing - tainting kernel
+      [    6.638800] myfw: loaded (default ACCEPT, tcp 300s / udp 5s / icmp 5s)
+
+======== 2. only root may control the firewall (was: any user) ========
+  [PASS] status as nobody is refused
+        error: permission denied: controlling the firewall needs root (CAP_NET_ADMIN)
+  [PASS] rule add as nobody is refused
+        error: permission denied: controlling the firewall needs root (CAP_NET_ADMIN)
+  [PASS] ...and no rule was added
+        myfw module         loaded (protocol v2)
+        default action      ACCEPT
+        filter rules        0
+        NAT rules           0
+        connections         0 / 16384
+        log entries         0 / 1000
+        timeouts            tcp 300s, udp 5s, icmp 5s
+        packets             0 new accepted, 0 dropped, 0 stateful, 0 NATed
+
+======== 3. default ACCEPT: everything flows ========
+  [PASS] client -> server tcp/80
+        OK 32 bytes echoed intact, local 10.0.1.2:40012
+  [PASS] client -> server udp/9000
+        OK 32 bytes echoed intact, local 10.0.1.2:48985
+  [PASS] client -> server ping
+        
+
+======== 4. blacklist rule, protocol-aware, with logging ========
+  [PASS] add drop rule for udp/9000
+        rule added
+  [PASS] udp/9000 is now blocked
+        FAIL timeout (sent 32, received 0 of 32)
+  [PASS] tcp/9000 still works (proto)
+        OK 32 bytes echoed intact, local 10.0.1.2:38728
+  [PASS] udp/9001 still works (port)
+        OK 32 bytes echoed intact, local 10.0.1.2:44351
+  [PASS] log has the DROP with today's date (was: 1970)
+        [2026-10-24 13:04:40] DROP   udp         10.0.1.2:58548 -> 10.0.2.2:9000         len=40    rule=no-udp9000
+  [PASS] rule hit counter counts the packet
+        #   name            source             sport       destination        dport       proto action log    packets        bytes
+        0   no-udp9000      any                any         10.0.2.2           9000        udp   drop   yes          1           40
+
+======== 5. rule order: first match wins, --head / --after ========
+  [PASS] insert an accept rule for the client at the head
+        rule added
+  [PASS] udp/9000 works again (accept matched first)
+        OK 32 bytes echoed intact, local 10.0.1.2:38397
+  [PASS] --after a rule that does not exist is refused
+        error: no rule with that name to insert after
+  [PASS] insert after allow-cli
+        rule added
+  [PASS] order is allow-cli, mid, no-udp9000
+        #   name            source             sport       destination        dport       proto action log    packets        bytes
+        0   allow-cli       10.0.1.2           any         any                9000        udp   accept no           1           40
+        1   mid             any                any         any                1234        tcp   drop   no           0            0
+        2   no-udp9000      any                any         10.0.2.2           9000        udp   drop   yes          1           40
+  [PASS] ...mid is second
+        #   name            source             sport       destination        dport       proto action log    packets        bytes
+        0   allow-cli       10.0.1.2           any         any                9000        udp   accept no           1           40
+        1   mid             any                any         any                1234        tcp   drop   no           0            0
+        2   no-udp9000      any                any         10.0.2.2           9000        udp   drop   yes          1           40
+  [PASS] delete allow-cli
+        deleted 1 rule(s)
+  [PASS] deleting it twice fails
+        error: no such rule
+
+======== 6. whitelist (default DROP) and real stateful replies ========
+  [PASS] flush rules
+        flushed 2 rule(s)
+  [PASS] allow client net -> server tcp/80 only
+        rule added
+  [PASS] default drop (logged)
+        default action is now DROP (logged)
+  [PASS] client -> server tcp/80 works: replies pass with NO reverse rule
+        OK 32 bytes echoed intact, local 10.0.1.2:40022
+  [PASS] large transfer (2 MB) over the tracked flow
+        OK 2000000 bytes echoed intact, local 10.0.1.2:40024
+  [PASS] client -> server tcp/8080 dropped
+        FAIL connect timeout
+  [PASS] client -> server ping dropped
+        
+  [PASS] server -> client tcp/2222 (inbound) dropped
+        FAIL connect timeout
+  [PASS] conn table shows the flow with reply packets
+        proto original direction                            nat   expires  packets (orig/reply)
+        tcp   10.0.1.2:40022 -> 10.0.2.2:80                 -          5s   6/4
+        tcp   10.0.1.2:40024 -> 10.0.2.2:80                 -          5s   94/89
+        2 connection(s)
+  [PASS] default-policy drops are logged
+        [2026-10-24 13:04:43] DROP   tcp         10.0.1.2:54780 -> 10.0.2.2:8080         len=40    (default policy)
+        [2026-10-24 13:04:44] DROP   tcp         10.0.1.2:54780 -> 10.0.2.2:8080         len=40    (default policy)
+        [2026-10-24 13:04:45] DROP   icmp              10.0.1.2 -> 10.0.2.2              len=64    (default policy)
+        [2026-10-24 13:04:46] DROP   tcp         10.0.2.2:59080 -> 10.0.1.2:2222         len=40    (default policy)
+        [2026-10-24 13:04:47] DROP   tcp         10.0.2.2:59080 -> 10.0.1.2:2222         len=40    (default policy)
+
+======== 6b. traffic from the firewall host itself (LOCAL_OUT hook) ========
+  [PASS] router -> server tcp/80 dropped (rule only allows the client net)
+        FAIL connect timeout
+  [PASS] allow the router's own address
+        rule added
+  [PASS] router -> server tcp/80 works
+        OK 32 bytes echoed intact, local 10.0.2.1:37012
+
+======== 7. connection timeout (udp_timeout=5) ========
+  [PASS] allow udp/9001
+        rule added
+  [PASS] client -> server udp/9001
+        OK 32 bytes echoed intact, local 10.0.1.2:43938
+  [PASS] the udp flow is tracked
+        proto original direction                            nat   expires  packets (orig/reply)
+        tcp   10.0.1.2:40022 -> 10.0.2.2:80                 -          3s   6/4
+        tcp   10.0.1.2:40024 -> 10.0.2.2:80                 -          3s   94/89
+        tcp   10.0.2.1:37012 -> 10.0.2.2:80                 -         10s   6/4
+        udp   10.0.1.2:43938 -> 10.0.2.2:9001               -          5s   1/1
+        4 connection(s)
+  [PASS] after 7s idle it has expired
+        proto original direction                            nat   expires  packets (orig/reply)
+        tcp   10.0.2.1:37012 -> 10.0.2.2:80                 -          3s   6/4
+        1 connection(s)
+
+======== 8. a new DROP rule cuts flows that are already established ========
+  [PASS] client -> server udp/9001 (flow established)
+        OK 32 bytes echoed intact, local 10.0.1.2:59814
+  [PASS] add drop rule for udp/9001 at the head
+        rule added
+  [PASS] the existing flow was removed
+        proto original direction                            nat   expires  packets (orig/reply)
+        tcp   10.0.2.1:37012 -> 10.0.2.2:80                 -          3s   6/4
+        1 connection(s)
+  [PASS] udp/9001 now blocked
+        FAIL timeout (sent 32, received 0 of 32)
+
+======== 9. save / load ========
+  [PASS] save ruleset
+        saved 4 rule(s) and 0 NAT rule(s) to /tmp/rules.fw
+  $ cat /tmp/rules.fw
+      # myfw ruleset saved Sat Oct 24 13:05:00 2026
+      rule default drop --log
+      rule add --name cut9001 --src any --dst any --sport any --dport 9001 --proto udp --action drop
+      rule add --name web --src 10.0.1.0/24 --dst 10.0.2.2 --sport any --dport 80 --proto tcp --action accept --log
+      rule add --name router --src 10.0.2.1 --dst any --sport any --dport any --proto any --action accept
+      rule add --name u9001 --src any --dst any --sport any --dport 9001 --proto udp --action accept
+  [PASS] flush
+        flushed 4 rule(s)
+  [PASS] nothing left
+        no rules
+  [PASS] load it back
+        flushed 0 rule(s)
+        flushed 0 NAT rule(s)
+        default action is now DROP (logged)
+        rule added
+        rule added
+        rule added
+        rule added
+        loaded 5 command(s) from /tmp/rules.fw, 0 failed
+  [PASS] restored ruleset is identical
+        
+  $ /fw/uapp rule ls
+      #   name            source             sport       destination        dport       proto action log    packets        bytes
+      0   cut9001         any                any         any                9001        udp   drop   no           0            0
+      1   web             10.0.1.0/24        any         10.0.2.2           80          tcp   accept yes          0            0
+      2   router          10.0.2.1           any         any                any         any   accept no           0            0
+      3   u9001           any                any         any                9001        udp   accept no           0            0
+
+======== 10. interactive mode (kept from the original) ========
+  [PASS] rule add with answers on stdin
+        insert after rule (empty = end of chain, ^ = top) []: rule name []: source ip/mask [any]: source ports (80, 8000-8100, any) [any]: destination ip/mask [any]: destination ports [any]: protocol (tcp/udp/icmp/any) [any]: action (accept/drop) [drop]: log matching packets (yes/no) [no]: rule added
+  [PASS] ping now allowed by the interactive rule
+        
+
+======== 11. input validation ========
+  [PASS] bad address 10.0.1.300
+        error: invalid address '10.0.1.300'
+  [PASS] bad port 70000
+        error: invalid port range '70000'
+  [PASS] reversed port range
+        error: invalid port range '90-80'
+  [PASS] bad protocol
+        error: invalid protocol 'xyz'
+  [PASS] name too long
+        error: rule name must be 1-15 characters
+  [PASS] missing --action
+        error: --name and --action are required
+  [PASS] delete NAT rule 99
+        error: no NAT rule with that number
+
+======== 12. SNAT (masquerade the client network) ========
+  [PASS] back to default accept, clear rules and logs
+        flushed 5 rule(s)
+        default action is now ACCEPT
+        logs cleared
+  (server no longer has a route back to 10.0.1.0/24)
+  [PASS] without NAT the server cannot answer the client
+        FAIL connect timeout
+  [PASS] add SNAT 10.0.1.0/24 -> 10.0.2.1 ports 20000-20999
+        NAT rule added
+  [PASS] client -> server tcp/80 works through SNAT
+        OK 32 bytes echoed intact, local 10.0.1.2:54466
+  [PASS] server saw the NAT address and a port from the pool
+        10.0.2.1:20284
+  [PASS] client -> server udp/9000 through SNAT
+        OK 32 bytes echoed intact, local 10.0.1.2:54032
+  [PASS] server saw 10.0.2.1 for udp too
+        10.0.2.1:20116
+  [PASS] ping through SNAT
+        
+  [PASS] 8 MB echo through SNAT, every byte verified (checksums, GSO)
+        OK 8000000 bytes echoed intact, local 10.0.1.2:54480
+  [PASS] conn shows the SNAT reply tuple
+        proto original direction                            nat   expires  packets (orig/reply)
+        tcp   10.0.1.2:54458 -> 10.0.2.2:80                 -        299s   2/0
+        tcp   10.0.1.2:54466 -> 10.0.2.2:80                 SNAT      10s   6/4
+              reply: 10.0.2.2:80 -> 10.0.2.1:20284
+        udp   10.0.1.2:54032 -> 10.0.2.2:9000               SNAT       5s   1/1
+              reply: 10.0.2.2:9000 -> 10.0.2.1:20116
+        icmp  10.0.1.2 -> 10.0.2.2                          SNAT       5s   1/1
+              reply: 10.0.2.2 -> 10.0.2.1
+        tcp   10.0.1.2:54480 -> 10.0.2.2:80                 SNAT      10s   309/270
+              reply: 10.0.2.2:80 -> 10.0.2.1:20487
+        5 connection(s)
+
+======== 12b. stress: parallel NAT traffic while rules change underneath ========
+        OK 4000000 bytes echoed intact, local 10.0.1.2:54490
+        OK 4000000 bytes echoed intact, local 10.0.1.2:54492
+        OK 4000000 bytes echoed intact, local 10.0.1.2:54520
+        OK 4000000 bytes echoed intact, local 10.0.1.2:54504
+  [PASS] 4 x 4 MB transfers intact during 150 rule add/del + 450 dumps
+  [PASS] rule chain is back to empty
+        myfw module         loaded (protocol v2)
+        default action      ACCEPT
+        filter rules        0
+        NAT rules           1
+        connections         7 / 16384
+        log entries         0 / 1000
+        timeouts            tcp 300s, udp 5s, icmp 5s
+        packets             25 new accepted, 9 dropped, 2517 stateful, 2303 NATed
+
+======== 13. DNAT (port forwarding into the client network) ========
+  [PASS] forward 10.0.2.1:8080/tcp -> 10.0.1.2:2222
+        NAT rule added
+  [PASS] forward 10.0.2.1:5353/udp -> 10.0.1.2:9500
+        NAT rule added
+  [PASS] server -> 10.0.2.1:8080 reaches the client's tcp/2222
+        OK 32 bytes echoed intact, local 10.0.2.2:55034
+  [PASS] client saw the real external address
+        10.0.2.2:55034
+  [PASS] 8 MB echo through DNAT, every byte verified
+        OK 8000000 bytes echoed intact, local 10.0.2.2:55050
+  [PASS] server -> 10.0.2.1:5353/udp reaches the client's udp/9500
+        OK 32 bytes echoed intact, local 10.0.2.2:59205
+  [PASS] conn shows the DNAT reply tuple
+        proto original direction                            nat   expires  packets (orig/reply)
+        tcp   10.0.1.2:54458 -> 10.0.2.2:80                 -        290s   2/0
+        tcp   10.0.1.2:54466 -> 10.0.2.2:80                 SNAT       2s   6/4
+              reply: 10.0.2.2:80 -> 10.0.2.1:20284
+        tcp   10.0.1.2:54480 -> 10.0.2.2:80                 SNAT       2s   309/270
+              reply: 10.0.2.2:80 -> 10.0.2.1:20487
+        tcp   10.0.1.2:54490 -> 10.0.2.2:80                 SNAT       3s   190/231
+              reply: 10.0.2.2:80 -> 10.0.2.1:20366
+        tcp   10.0.1.2:54492 -> 10.0.2.2:80                 SNAT       3s   215/183
+              reply: 10.0.2.2:80 -> 10.0.2.1:20935
+        tcp   10.0.1.2:54504 -> 10.0.2.2:80                 SNAT       3s   256/181
+              reply: 10.0.2.2:80 -> 10.0.2.1:20803
+        tcp   10.0.1.2:54520 -> 10.0.2.2:80                 SNAT       3s   264/182
+              reply: 10.0.2.2:80 -> 10.0.2.1:20195
+        tcp   10.0.2.2:55034 -> 10.0.2.1:8080               DNAT      10s   6/4
+              reply: 10.0.1.2:2222 -> 10.0.2.2:55034
+        tcp   10.0.2.2:55050 -> 10.0.2.1:8080               DNAT      10s   280/313
+              reply: 10.0.1.2:2222 -> 10.0.2.2:55050
+        udp   10.0.2.2:59205 -> 10.0.2.1:5353               DNAT       5s   1/1
+              reply: 10.0.1.2:9500 -> 10.0.2.2:59205
+        10 connection(s)
+  $ /fw/uapp nat ls
+      0   SNAT  from 10.0.1.0/24        -> source 10.0.2.1 ports 20000-20999   (12 flows)
+      1   DNAT  tcp 10.0.2.1:8080         -> 10.0.1.2:2222   (2 flows)
+      2   DNAT  udp 10.0.2.1:5353         -> 10.0.1.2:9500   (1 flows)
+  [PASS] delete NAT rule 0 (the SNAT)
+        NAT rule deleted
+  [PASS] client -> server fails again without SNAT
+        FAIL connect timeout
+  [PASS] flush NAT
+        flushed 2 NAT rule(s)
+  [PASS] no NAT rules left
+        no NAT rules
+
+======== 14. status ========
+  $ /fw/uapp status
+      myfw module         loaded (protocol v2)
+      default action      ACCEPT
+      filter rules        0
+      NAT rules           0
+      connections         2 / 16384
+      log entries         0 / 1000
+      timeouts            tcp 300s, udp 5s, icmp 5s
+      packets             29 new accepted, 9 dropped, 3120 stateful, 2908 NATed
+
+======== 15. unload / reload ========
+  [PASS] rmmod myfw
+        
+  [PASS] uapp explains the module is gone
+        error: the myfw kernel module is not loaded (sudo insmod kernel_mod/myfw.ko)
+  [PASS] traffic still flows without the module
+        OK 32 bytes echoed intact, local 10.0.1.2:45222
+  [PASS] insmod again
+        
+  [PASS] starts clean
+        myfw module         loaded (protocol v2)
+        default action      ACCEPT
+        filter rules        0
+        NAT rules           0
+        connections         0 / 16384
+        log entries         0 / 1000
+        timeouts            tcp 300s, udp 60s, icmp 30s
+        packets             0 new accepted, 0 dropped, 0 stateful, 0 NATed
+  [PASS] rmmod again
+        
+
+======== 16. kernel log health ========
+  $ sh -c dmesg | grep myfw
+      [    6.631710] myfw: loading out-of-tree module taints kernel.
+      [    6.631950] myfw: module verification failed: signature and/or required key missing - tainting kernel
+      [    6.638800] myfw: loaded (default ACCEPT, tcp 300s / udp 5s / icmp 5s)
+      [   41.110607] myfw: unloaded
+      [   41.336777] myfw: loaded (default ACCEPT, tcp 300s / udp 60s / icmp 30s)
+      [   41.401827] myfw: unloaded
+  [PASS] no BUG / WARNING / Oops / lockdep splat in dmesg
+        [    6.631710] myfw: loading out-of-tree module taints kernel.
+        [    6.631950] myfw: module verification failed: signature and/or required key missing - tainting kernel
+        [    6.638800] myfw: loaded (default ACCEPT, tcp 300s / udp 5s / icmp 5s)
+        [   41.110607] myfw: unloaded
+        [   41.336777] myfw: loaded (default ACCEPT, tcp 300s / udp 60s / icmp 30s)
+        [   41.401827] myfw: unloaded
+
+RESULT: 88 passed, 0 failed
+E2E_EXIT=0
+[   41.534561] reboot: Power down

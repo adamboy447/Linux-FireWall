@@ -1,0 +1,15 @@
+# kernel build output
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+.*.cmd
+*.order
+*.symvers
+.tmp_versions/
+# userspace
+cmd/uapp
+test/fwtest
+# VM test output
+test/vm/out*

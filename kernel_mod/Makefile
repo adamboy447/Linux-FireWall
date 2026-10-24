@@ -1,23 +1,14 @@
-MODULE_NAME	= myfw
+MODULE_NAME := myfw
+KDIR ?= /lib/modules/$(shell uname -r)/build
 
-SRC := tools.c helpers/netlink_helper.c helpers/log_helper.c helpers/rule_helper.c helpers/conn_helper.c helpers/nat_helper.c helpers/app_helper.c hooks/hook_main.c hooks/hook_nat.c mod_main.c
-
-KDIR := /lib/modules/$(shell uname -r)/build
-
-EXTRA_CFLAGS := -I$(src)/include -I$(src)/hooks -I$(src)/helpers
-
-$(MODULE_NAME)-objs = $(SRC:.c=.o)
 obj-m := $(MODULE_NAME).o
-PWD := $(shell pwd)
+$(MODULE_NAME)-objs := mod_main.o hooks.o pkt.o rules.o conn.o nat.o log.o netlink.o
+ccflags-y := -I$(src)/../include -Wall
 
 all:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
-
-install:
-	insmod $(PWD)/$(MODULE_NAME).ko
-	$(MAKE) clean
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules clean
-	rm -rf modules.order
-	rm -f *.symvers
+	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
+
+.PHONY: all clean

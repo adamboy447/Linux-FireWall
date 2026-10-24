@@ -98,7 +98,7 @@ TestScript/            手動測試用的 Python UDP 收發腳本
 
 ```bash
 sudo apt install build-essential linux-headers-$(uname -r)
-git clone https://github.com/adamboy447/FireWall && cd FireWall
+git clone https://github.com/adamboy447/Linux-FireWall && cd Linux-FireWall
 make                      # 編譯 kernel_mod/myfw.ko 與 cmd/uapp
 sudo make load            # insmod；要帶參數：sudo make load OPTS="udp_timeout=30"
 sudo ./cmd/uapp status

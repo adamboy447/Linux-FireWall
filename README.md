@@ -2,7 +2,7 @@
 
 以 Linux kernel module 實作的 IPv4 防火牆，具備封包過濾、真正雙向的連線狀態追蹤、SNAT（來源 NAT／偽裝）與 DNAT（port forwarding），並透過 Netlink 由命令列工具 `uapp` 控制。
 
-本專案改寫自 [jujuegg/FireWall](https://github.com/jujuegg/FireWall)（其前身為 RicheyJang 的 RJFireWall）。修正了原版的多個錯誤，補上新功能，並附上可在 QEMU 虛擬機中一鍵執行的完整測試（88 項全數通過，見[測試](#測試)）。
+可在 QEMU 虛擬機中一鍵執行的完整測試（88 項全數通過，見[測試](#測試)）。
 
 ## 功能
 

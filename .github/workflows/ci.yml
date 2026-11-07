@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Control plane unit tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: pip install -e "control[test]"
+      - name: Unit tests (incl. C/Python ABI cross-check)
+        run: python -m pytest -q control/tests
+      - name: Policy validation (demo must pass, every invalid case must fail with its code)
+        run: test/ci/check-policies.sh
+
+  observability:
+    name: Prometheus config and alert unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: promtool check config + test rules
+        run: |
+          docker run --rm -v "$PWD/observability:/w" -w /w --entrypoint promtool prom/prometheus:v2.53.2 \
+            check config prometheus.yml
+          docker run --rm -v "$PWD/observability:/w" -w /w --entrypoint promtool prom/prometheus:v2.53.2 \
+            test rules alerts_test.yml
+      - name: Dashboard is valid JSON
+        run: python3 -m json.tool observability/dashboards/myfw.json > /dev/null
+
+  build:
+    name: Kernel module and uapp build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Kernel headers
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq linux-headers-$(uname -r)
+      - name: Build (warnings are errors)
+        run: make KDIR=/lib/modules/$(uname -r)/build WERROR=1
+      - name: modinfo
+        run: modinfo kernel_mod/myfw.ko
+
+  e2e:
+    name: End-to-end tests in a QEMU VM
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm || true
+      - name: Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 busybox-static cpio zstd iproute2 util-linux \
+            linux-headers-$(uname -r)
+          sudo chmod a+r /boot/vmlinuz-$(uname -r)
+      - name: Run test/e2e.sh in the VM
+        run: sudo KVER=$(uname -r) ./test/vm/run.sh
+      - name: Keep the VM log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-log
+          path: test/results/
+          if-no-files-found: ignore

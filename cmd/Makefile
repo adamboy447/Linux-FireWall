@@ -1,6 +1,9 @@
 CC      ?= gcc
 CFLAGS  ?= -O2 -g
 CFLAGS  += -Wall -Wextra -I../include
+ifdef WERROR
+CFLAGS  += -Werror
+endif
 LDFLAGS ?=
 
 uapp: main.o nl.o util.o policy.o sha256.o

@@ -20,6 +20,7 @@
 | VM 整合測試 | `sudo pytest test/integration`（在部署好的 VM 內） | 26 | 26/26（10 分鐘） |
 | pending 中重開機 | `test/integration/reboot_pending.py prepare` → reboot → `check` | 1 | PASS |
 | Ansible 冪等 | 同一個 playbook 連跑兩次 | 2 | 第 1 次 `changed=2`（新程式碼 + 重啟 handler），第 2 次 `changed=0` |
+| GitHub Actions CI | `.github/workflows/ci.yml` | 5 jobs | 全部通過（單元測試 3.10 / 3.12、告警測試、`-Werror` 編譯、runner 上 KVM 的 QEMU e2e） |
 | 開機還原 | VM 非正常停止後重新開機 | 1 | `myfw-boot` 套用最後確認版（label `boot-restore`），之後才開 forwarding |
 
 原始紀錄：`test/results/e2e-kernel-*.log`、`test/results/integration.log`。
@@ -103,6 +104,7 @@ QEMU initramfs VM（不碰主機網路），三個 namespace：client / router�
 | `fwctl apply --json` 在自動 rollback 後 exit 0 | `test_failed_required_service_rolls_back_immediately` | rollback 時 exit 4 |
 | Ansible 更新程式碼後沒有重啟常駐程式 | 部署新版後行為沒變 | 新增 restart handler（保留 namespace 與介面） |
 | `control/pyproject.toml` 的 readme 指到套件外，`pip install` 失敗 | CI 前在乾淨 venv 安裝 | 套件自己的 README |
+| agent 單元測試在非 root 使用者下失敗（角色取自 /etc/group） | 第一次 CI | fixture 明確給予角色；以 root 與 nobody 各跑一次確認 |
 | e2e「flow 配置失敗」測試不穩定 | 6.17 重跑時偶發失敗 | 見上 |
 | 效能腳本中途失敗時沒有恢復受管理狀態 | nftables 規則語法錯誤讓腳本中斷，模組停在卸載狀態 | `trap` 一律恢復 |
 
@@ -111,4 +113,3 @@ QEMU initramfs VM（不碰主機網路），三個 namespace：client / router�
 - 只在 TCG 模擬環境測過；沒有在實體網卡、多佇列、KVM 上測。
 - 沒有 lockdep / KASAN 的 debug kernel 執行（dmesg 只檢查一般 kernel 會印出的錯誤）。
 - 沒有長時間（數天）穩定性測試。
-- GitHub Actions 的 e2e job 在 runner 上的執行結果以實際 CI 為準。

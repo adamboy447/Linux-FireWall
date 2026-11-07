@@ -1,0 +1,42 @@
+# Unit tests for alerts.yml:  promtool test rules observability/alerts_test.yml
+rule_files: [alerts.yml]
+evaluation_interval: 15s
+tests:
+  - interval: 15s
+    input_series:
+      - series: 'myfw_collector_up'
+        values: '1 1 1 0 0 0 0 0 0 0 0 0'
+      - series: 'myfw_drops_total{reason="nat_allocation_failed"}'
+        values: '0 0 0 0 3 6 6 6 6'
+      - series: 'myfw_connections'
+        values: '100+0x20 15000+0x20'
+      - series: 'myfw_connection_limit'
+        values: '16384+0x40'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: MyfwCollectorDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: MyfwCollectorDown
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "myfw metrics are not being collected"
+              description: "The collector cannot read the kernel/agent. Firewall series are absent, not zero; check `fwctl status` and the myfw-agent unit."
+      - eval_time: 90s
+        alertname: MyfwSnatPoolExhausted
+        exp_alerts:
+          - exp_labels: {severity: page, reason: nat_allocation_failed}
+            exp_annotations:
+              summary: "SNAT port pool exhausted: outbound connections are refused"
+              description: "See docs/incidents/nat-pool-exhaustion.md."
+      - eval_time: 4m
+        alertname: MyfwFlowTableNearlyFull
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: MyfwFlowTableNearlyFull
+        exp_alerts:
+          - exp_labels: {severity: warn}
+            exp_annotations:
+              summary: "flow table above 80%"
+              description: "New flows are dropped (reason flow_table_full) once the table is full."

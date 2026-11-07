@@ -1,0 +1,77 @@
+groups:
+  - name: myfw
+    rules:
+      # --- health ---------------------------------------------------------
+      - alert: MyfwCollectorDown
+        expr: myfw_collector_up == 0 or absent(myfw_collector_up)
+        for: 1m
+        labels: {severity: page}
+        annotations:
+          summary: "myfw metrics are not being collected"
+          description: "The collector cannot read the kernel/agent. Firewall series are absent, not zero; check `fwctl status` and the myfw-agent unit."
+
+      - alert: MyfwGuardDown
+        expr: myfw_guard_up == 0
+        for: 30s
+        labels: {severity: page}
+        annotations:
+          summary: "rollback guard is not running"
+          description: "Unconfirmed changes cannot be rolled back automatically, and fwctl refuses new applies until the guard is back."
+
+      - alert: MyfwRequiredServiceFailing
+        expr: myfw_service_probe_success{expect="allow"} == 0
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "required service {{ $labels.probe }} fails its probe"
+          description: "Run `fwctl diagnose` for the path; it separates policy drops from routing and service faults."
+
+      # --- changes --------------------------------------------------------
+      - alert: MyfwChangeAboutToRollBack
+        expr: myfw_change_pending == 1 and (myfw_change_deadline_seconds - time()) < 15
+        labels: {severity: warn}
+        annotations:
+          summary: "a policy change is about to be rolled back automatically"
+
+      - alert: MyfwChangeRolledBack
+        expr: increase(myfw_changes_total{state="rolled_back"}[10m]) > 0
+        labels: {severity: warn}
+        annotations:
+          summary: "a policy change was rolled back in the last 10 minutes"
+          description: "See `fwctl history` for the reason (failed probe, deadline, reboot)."
+
+      # --- capacity (fail-closed paths) -----------------------------------
+      - alert: MyfwFlowTableNearlyFull
+        expr: myfw_connections / myfw_connection_limit > 0.8
+        for: 2m
+        labels: {severity: warn}
+        annotations:
+          summary: "flow table above 80%"
+          description: "New flows are dropped (reason flow_table_full) once the table is full."
+
+      - alert: MyfwFlowTableFull
+        expr: increase(myfw_drops_total{reason="flow_table_full"}[5m]) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "new connections are being refused: flow table full"
+
+      - alert: MyfwSnatPoolExhausted
+        expr: increase(myfw_drops_total{reason="nat_allocation_failed"}[5m]) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "SNAT port pool exhausted: outbound connections are refused"
+          description: "See docs/incidents/nat-pool-exhaustion.md."
+
+      # --- traffic and logging --------------------------------------------
+      - alert: MyfwSpoofedTraffic
+        expr: rate(myfw_drops_total{reason="spoofed_source"}[5m]) > 1
+        for: 5m
+        labels: {severity: warn}
+        annotations:
+          summary: "sustained spoofed-source drops"
+
+      - alert: MyfwEventsLost
+        expr: increase(myfw_collector_events_lost_total[10m]) > 0
+        labels: {severity: info}
+        annotations:
+          summary: "kernel events were lost before collection (gap recorded in the event log)"

@@ -1,0 +1,16 @@
+# Prometheus scrape configuration for the myfw collector (127.0.0.1:9108).
+# The collector omits the myfw_* series when it cannot read the kernel, so
+# "no data" is never confused with "no traffic": alert on myfw_collector_up.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: myfw
+    static_configs:
+      - targets: ["127.0.0.1:9108"]
+        labels:
+          host: fwlab

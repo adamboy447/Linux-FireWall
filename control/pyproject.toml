@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "myfw-ops"
 version = "2.0.0"
 description = "Policy-as-code control plane for the myfw kernel firewall: validate, diff, transactional apply, confirm/rollback, diagnose, collect"
-readme = "../README.md"
+readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.10"
 dependencies = [

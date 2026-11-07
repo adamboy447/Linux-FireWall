@@ -7,6 +7,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 INV=${MYFW_INVENTORY:-$ROOT/lab/inventory.yaml}
 FWCTL=${FWCTL:-fwctl}
 fail=0
+command -v "$FWCTL" >/dev/null || { echo "fwctl not found (pip install -e control, or set FWCTL)"; exit 2; }
 
 for p in "$ROOT"/policies/*.yaml; do
 	if out=$($FWCTL validate "$p" --inventory "$INV" --json); then

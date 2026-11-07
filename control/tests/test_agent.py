@@ -22,6 +22,9 @@ def server(tmp_path, monkeypatch):
         def audit(self, *a, **k):
             pass
     monkeypatch.setattr(agent, "store", lambda: NoAudit())
+    # roles come from /etc/group; tests run as any user (root locally, an
+    # unprivileged runner in CI), so grant both unless a test says otherwise
+    monkeypatch.setattr(agent, "roles", lambda uid, gid: {"read", "write"})
     srv = agent.Server(sock, agent.Handler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()

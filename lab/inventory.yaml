@@ -1,0 +1,51 @@
+# Lab inventory: the facts about this box that the business policy does not
+# own. The protected baseline (management access, loopback, anti-lockout)
+# is generated from this file and is always evaluated before the policy.
+schema_version: 1
+gateway: fwlab
+
+management:
+  interface: mgmt0                 # QEMU user-mode NIC; SSH is forwarded from the laptop
+  address: 10.0.2.15/24
+  admin_sources: [10.0.2.2/32]     # the laptop, as seen through QEMU's NAT
+  services:
+    - {name: ssh, protocol: tcp, port: 22}
+
+# Data zones. Each is one veth link from the gateway (initial namespace)
+# to a network namespace; there is no bridge that could bypass the firewall.
+zones:
+  lan: {interface: veth-lan, gateway_address: 10.10.10.1/24}
+  dmz: {interface: veth-dmz, gateway_address: 10.10.20.1/24}
+  wan: {interface: veth-wan, gateway_address: 192.0.2.1/24}
+default_route_zone: wan            # anything not inside a zone is "outside"
+
+endpoints:
+  lan-client:
+    namespace: lan
+    zone: lan
+    address: 10.10.10.10
+    services: [{name: http-alt, protocol: tcp, port: 8080}]
+  dmz-web:
+    namespace: dmz
+    zone: dmz
+    address: 10.10.20.10
+    services: [{name: https, protocol: tcp, port: 443}]
+  wan-host:
+    namespace: wan
+    zone: wan
+    address: 192.0.2.10
+    services: [{name: https, protocol: tcp, port: 443}]
+
+# The access matrix of the demo (docs/demo.md). `fwctl verify` runs these
+# from the endpoints' namespaces; `required: true` probes gate a change.
+required_services:
+  - {name: lan-to-dmz-https,      from: lan-client, to: 10.10.20.10, port: 443,  check: https, expect: allow}
+  - {name: lan-to-wan-https-snat, from: lan-client, to: 192.0.2.10,  port: 443,  check: https, expect: allow}
+  - {name: wan-published-https,   from: wan-host,   to: 192.0.2.1,   port: 8443, check: https, expect: allow}
+  - {name: wan-direct-to-dmz,     from: wan-host,   to: 10.10.20.10, port: 443,  check: tcp,   expect: deny}
+  - {name: wan-other-gw-port,     from: wan-host,   to: 192.0.2.1,   port: 8080, check: tcp,   expect: deny}
+  - {name: dmz-to-lan,            from: dmz-web,    to: 10.10.10.10, port: 8080, check: tcp,   expect: deny}
+  - {name: lan-to-gw-ssh,         from: lan-client, to: 10.10.10.1,  port: 22,   check: tcp,   expect: deny}
+  - {name: lan-to-mgmt-ssh,       from: lan-client, to: 10.0.2.15,   port: 22,   check: tcp,   expect: deny}
+  - {name: wan-to-gw-ssh,         from: wan-host,   to: 192.0.2.1,   port: 22,   check: tcp,   expect: deny}
+  - {name: lan-unlisted-port,     from: lan-client, to: 10.10.20.10, port: 8443, check: tcp,   expect: deny}

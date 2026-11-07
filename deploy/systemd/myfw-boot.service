@@ -1,0 +1,16 @@
+[Unit]
+Description=myfw: load the module, restore the last confirmed policy, then enable forwarding
+Documentation=file:///opt/myfw/src/docs/transaction-design.md
+After=myfw-lab.service systemd-networkd.service
+Wants=myfw-lab.service
+Before=myfw-agent.service myfw-guard.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/myfw-boot
+# forwarding stays off if the restore failed
+ExecStopPost=/bin/sh -c 'echo 0 > /proc/sys/net/ipv4/ip_forward'
+
+[Install]
+WantedBy=multi-user.target

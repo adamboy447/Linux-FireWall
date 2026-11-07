@@ -1,0 +1,4 @@
+#!/bin/sh
+# managed by deploy/ansible/site.yml
+export PYTHONPATH={{ myfw_lib }}
+exec {{ myfw_venv }}/bin/python -m myfw_ops.{{ item.module }} "$@"

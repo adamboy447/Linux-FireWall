@@ -13,3 +13,7 @@ cmd/uapp
 test/fwtest
 # VM test output
 test/vm/out*
+# python
+__pycache__/
+.pytest_cache/
+*.egg-info/

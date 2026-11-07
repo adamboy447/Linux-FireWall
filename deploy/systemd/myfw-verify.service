@@ -1,0 +1,8 @@
+[Unit]
+Description=myfw required-service probes (result exported by the collector)
+After=myfw-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fwctl verify --record
+SuccessExitStatus=1

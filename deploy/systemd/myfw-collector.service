@@ -1,0 +1,20 @@
+[Unit]
+Description=myfw collector (events to JSONL, metrics on 127.0.0.1:9108)
+After=myfw-agent.service
+
+[Service]
+ExecStart=/usr/local/sbin/myfw-collector
+Restart=always
+RestartSec=2
+User=myfw-collector
+Group=myfw-read
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/log/myfw /var/lib/myfw-collector
+RestrictAddressFamilies=AF_UNIX AF_INET
+
+[Install]
+WantedBy=multi-user.target

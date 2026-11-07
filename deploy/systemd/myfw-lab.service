@@ -1,0 +1,14 @@
+[Unit]
+Description=myfw lab topology (LAN/DMZ/WAN namespaces and test services)
+Documentation=file:///opt/myfw/src/docs/runbook.md
+After=network.target
+Before=myfw-boot.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/myfw-lab up
+ExecStop=/usr/local/sbin/myfw-lab down
+
+[Install]
+WantedBy=multi-user.target

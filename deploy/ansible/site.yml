@@ -1,0 +1,223 @@
+# Prepare a Linux VM to run myfw (module + uapp + control plane + lab).
+#
+#   sudo ansible-playbook -c local -i localhost, deploy/ansible/site.yml
+#   sudo ansible-playbook ... -e deploy_policy=policies/demo.yaml   # also apply & confirm
+#
+# Policy is NEVER written rule by rule here: the optional last step calls the
+# same fwctl -> agent -> kernel transaction an operator would use, so a second
+# run with the same policy is a no-op (same semantic hash).
+- name: myfw firewall host
+  hosts: all
+  become: true
+  vars:
+    repo_dir: "{{ playbook_dir }}/../.."
+    kver: "{{ ansible_kernel }}"
+    myfw_root: /opt/myfw
+    myfw_lib: /opt/myfw/lib
+    myfw_venv: /opt/myfw/venv
+    wheelhouse: ""                      # optional offline wheel directory
+    admin_user: "{{ ansible_env.SUDO_USER | default('') }}"
+    deploy_policy: ""
+    confirm_timeout: 60
+    install_packages: true
+    python_requirements:
+      - "pydantic>=2.6,<3"
+      - "typer>=0.12"
+      - "pyyaml>=6"
+      - "prometheus_client>=0.20"
+      - "pytest>=8"
+    wrappers:
+      - {name: fwctl, module: cli, dir: /usr/local/bin}
+      - {name: myfw-agent, module: agent, dir: /usr/local/sbin}
+      - {name: myfw-guard, module: guard, dir: /usr/local/sbin}
+      - {name: myfw-boot, module: boot, dir: /usr/local/sbin}
+      - {name: myfw-collector, module: collector, dir: /usr/local/sbin}
+      - {name: myfw-lab, module: lab, dir: /usr/local/sbin}
+      - {name: myfw-probe, module: probe, dir: /usr/local/sbin}
+
+  tasks:
+    - name: Packages (build, kernel headers, lab and test tools)
+      ansible.builtin.apt:
+        name:
+          - build-essential
+          - "linux-headers-{{ kver }}"
+          - python3-venv
+          - iproute2
+          - nftables
+          - iperf3
+          - tcpdump
+          - openssl
+          - sysstat
+          - iputils-ping
+        state: present
+        update_cache: true
+        cache_valid_time: 86400
+      when: install_packages | bool
+
+    - name: Groups (myfw = may change the policy, myfw-read = may read state)
+      ansible.builtin.group:
+        name: "{{ item }}"
+        system: true
+      loop: [myfw, myfw-read]
+
+    - name: Collector user
+      ansible.builtin.user:
+        name: myfw-collector
+        system: true
+        group: myfw-read
+        shell: /usr/sbin/nologin
+        create_home: false
+
+    - name: Admin user may operate the firewall
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        groups: [myfw, myfw-read]
+        append: true
+      when: admin_user | length > 0
+
+    - name: Build module and uapp (outputs are compared on install below)
+      ansible.builtin.command:
+        cmd: make -s -C {{ repo_dir }} KDIR=/lib/modules/{{ kver }}/build
+      changed_when: false
+
+    - name: Module directory
+      ansible.builtin.file:
+        path: "/lib/modules/{{ kver }}/extra"
+        state: directory
+        mode: "0755"
+
+    - name: Install the kernel module
+      ansible.builtin.copy:
+        src: "{{ repo_dir }}/kernel_mod/myfw.ko"
+        dest: "/lib/modules/{{ kver }}/extra/myfw.ko"
+        remote_src: true
+        mode: "0644"
+      notify: depmod
+
+    - name: Install uapp
+      ansible.builtin.copy:
+        src: "{{ repo_dir }}/cmd/uapp"
+        dest: /usr/local/sbin/uapp
+        remote_src: true
+        mode: "0755"
+
+    - name: Module options (default DROP until a policy is committed)
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/myfw.conf
+        content: "options myfw initial_action=0\n"
+        mode: "0644"
+
+    - name: Directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner | default('root') }}"
+        group: "{{ item.group | default('root') }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - {path: "{{ myfw_root }}", mode: "0755"}
+        - {path: "{{ myfw_lib }}", mode: "0755"}
+        - {path: /etc/myfw, mode: "0755"}
+        - {path: /var/lib/myfw, group: myfw-read, mode: "0750"}
+        - {path: /var/lib/myfw-lab, mode: "0755"}
+        - {path: /var/log/myfw, owner: myfw-collector, group: myfw-read, mode: "0750"}
+        - {path: /var/lib/myfw-collector, owner: myfw-collector, group: myfw-read, mode: "0750"}
+
+    - name: Python virtual environment and dependencies
+      ansible.builtin.pip:
+        name: "{{ python_requirements }}"
+        virtualenv: "{{ myfw_venv }}"
+        virtualenv_command: python3 -m venv
+        extra_args: "{{ ('--no-index --find-links ' + wheelhouse) if wheelhouse else '' }}"
+
+    - name: Control plane package
+      ansible.builtin.copy:
+        src: "{{ repo_dir }}/control/src/myfw_ops"
+        dest: "{{ myfw_lib }}/"
+        remote_src: true
+        mode: "u=rwX,g=rX,o=rX"     # X: directories stay traversable for the non-root services
+
+    - name: Program wrappers
+      ansible.builtin.template:
+        src: wrapper.sh.j2
+        dest: "{{ item.dir }}/{{ item.name }}"
+        mode: "0755"
+      loop: "{{ wrappers }}"
+
+    - name: Inventory
+      ansible.builtin.copy:
+        src: "{{ repo_dir }}/lab/inventory.yaml"
+        dest: /etc/myfw/inventory.yaml
+        remote_src: true
+        mode: "0644"
+
+    - name: systemd units
+      ansible.builtin.copy:
+        src: "{{ repo_dir }}/deploy/systemd/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        remote_src: true
+        mode: "0644"
+      loop:
+        - myfw-lab.service
+        - myfw-boot.service
+        - myfw-agent.service
+        - myfw-guard.service
+        - myfw-collector.service
+        - myfw-verify.service
+        - myfw-verify.timer
+      notify: daemon-reload
+
+    - name: Runtime directory
+      ansible.builtin.copy:
+        src: "{{ repo_dir }}/deploy/systemd/myfw.tmpfiles"
+        dest: /etc/tmpfiles.d/myfw.conf
+        remote_src: true
+        mode: "0644"
+      notify: tmpfiles
+
+    - name: Forwarding is off until myfw-boot has committed a policy
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/90-myfw.conf
+        content: |
+          # managed by deploy/ansible/site.yml: myfw-boot enables forwarding
+          net.ipv4.ip_forward = 0
+          net.ipv6.conf.all.forwarding = 0
+        mode: "0644"
+
+    - name: Flush handlers before starting services
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start the services
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - myfw-lab.service
+        - myfw-boot.service
+        - myfw-agent.service
+        - myfw-guard.service
+        - myfw-collector.service
+        - myfw-verify.timer
+
+    - name: Apply the policy through fwctl (no-op when the semantic hash is unchanged)
+      ansible.builtin.command:
+        argv: [/usr/local/bin/fwctl, apply, "{{ deploy_policy if deploy_policy.startswith('/') else repo_dir + '/' + deploy_policy }}", --json,
+               --confirm-timeout, "{{ confirm_timeout | string }}"]
+      register: applied
+      changed_when: not (applied.stdout | from_json).no_op
+      when: deploy_policy | length > 0
+
+    - name: Confirm the change (it passed the required-service probes)
+      ansible.builtin.command:
+        argv: [/usr/local/bin/fwctl, confirm, "{{ (applied.stdout | from_json).change_id }}"]
+      when: deploy_policy | length > 0 and not (applied.stdout | from_json).no_op
+
+  handlers:
+    - name: depmod
+      ansible.builtin.command: depmod -a {{ kver }}
+    - name: daemon-reload
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+    - name: tmpfiles
+      ansible.builtin.command: systemd-tmpfiles --create /etc/tmpfiles.d/myfw.conf

@@ -1,0 +1,25 @@
+[Unit]
+Description=myfw rollback guard (rolls back unconfirmed changes at their deadline)
+After=myfw-boot.service
+Requires=myfw-boot.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/local/sbin/myfw-guard
+Restart=always
+RestartSec=1
+WatchdogSec=10
+Group=myfw-read
+UMask=0027
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/myfw /run/myfw
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

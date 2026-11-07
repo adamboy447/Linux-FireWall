@@ -1,0 +1,89 @@
+# expect: duplicate-id
+# two rules with the same id
+schema_version: 1
+metadata:
+  name: laptop-firewall-lab
+  owner: allan
+  reason: Internal and simulated external users reach DMZ HTTPS through defined paths
+defaults:
+  action: drop
+  log_mode: sampled
+  shadowing: error
+zones:
+  lan:
+    interface: veth-lan
+    allowed_sources:
+    - 10.10.10.0/24
+  dmz:
+    interface: veth-dmz
+    allowed_sources:
+    - 10.10.20.0/24
+  wan:
+    interface: veth-wan
+    allowed_sources:
+    - 192.0.2.0/24
+rules:
+- id: lan-dmz-web
+  scope: ingress
+  ingress_zone: lan
+  source: 10.10.10.0/24
+  destination: 10.10.20.10/32
+  protocol: tcp
+  destination_ports: &id001
+  - 443
+  action: accept
+  owner: demo-web
+  reason: Internal users reach the HTTPS service
+- id: lan-wan-web
+  scope: ingress
+  ingress_zone: lan
+  source: 10.10.10.0/24
+  destination: 192.0.2.10/32
+  protocol: tcp
+  destination_ports:
+  - 443
+  action: accept
+  owner: demo-web
+  reason: Controlled outbound access, translated by SNAT
+- id: wan-published-web
+  scope: ingress
+  ingress_zone: wan
+  source: 192.0.2.0/24
+  destination: 192.0.2.1/32
+  protocol: tcp
+  destination_ports:
+  - 8443
+  action: accept
+  log: true
+  owner: demo-web
+  reason: Publish exactly one HTTPS service
+- id: lan-dmz-web
+  scope: ingress
+  ingress_zone: lan
+  source: 10.10.10.0/24
+  destination: 10.10.20.10/32
+  protocol: tcp
+  destination_ports: *id001
+  action: accept
+  owner: demo-web
+  reason: Internal users reach the HTTPS service
+nat:
+- id: lan-outbound
+  type: snat
+  ingress_zone: lan
+  egress_interface: veth-wan
+  source: 10.10.10.0/24
+  destination: 192.0.2.10/32
+  to_address: 192.0.2.1
+  port_range:
+  - 20000
+  - 20999
+- id: publish-web
+  type: dnat
+  ingress_zone: wan
+  destination: 192.0.2.1/32
+  protocol: tcp
+  destination_ports:
+  - 8443
+  to_address: 10.10.20.10
+  to_port: 443

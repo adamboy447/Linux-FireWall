@@ -1,0 +1,41 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.2.0, pluggy-1.7.0 -- /opt/myfw/venv/bin/python
+rootdir: /opt/myfw/src
+collecting ... collected 26 items
+
+test/integration/test_changes.py::test_invalid_candidates_never_touch_the_active_policy PASSED
+test/integration/test_changes.py::test_interrupted_staging_is_released PASSED
+test/integration/test_changes.py::test_two_writers_one_generation PASSED
+test/integration/test_changes.py::test_concurrent_fwctl_applies PASSED
+test/integration/test_changes.py::test_commits_under_load_never_mix_policies 
+responses ok=19 failed=6 wrong=0; gate ms max=5.031 median=0.548; drops {'default_policy': 13}
+PASSED
+test/integration/test_changes.py::test_flow_reset_is_reported_and_new_connections_work 
+SNAT download across a commit: 7283968 of 8000000 bytes (the NAT session is reset by design)
+PASSED
+test/integration/test_changes.py::test_failed_required_service_rolls_back_immediately PASSED
+test/integration/test_changes.py::test_unconfirmed_change_is_rolled_back_by_the_guard 
+rolled back 1.2s after the 10 s deadline (13.2s after apply)
+PASSED
+test/integration/test_changes.py::test_agent_crash_does_not_stop_the_data_plane_or_the_guard PASSED
+test/integration/test_changes.py::test_guard_is_restarted_and_apply_refuses_without_it PASSED
+test/integration/test_changes.py::test_capacity_flow_limit_fails_closed PASSED
+test/integration/test_changes.py::test_snat_pool_exhaustion_fails_closed 
+third-refused TimeoutError 
+PASSED
+test/integration/test_matrix.py::test_access_matrix PASSED
+test/integration/test_matrix.py::test_dnat_large_transfer_content PASSED
+test/integration/test_matrix.py::test_spoofed_sources_are_dropped_before_the_flow_lookup PASSED
+test/integration/test_matrix.py::test_nothing_leaves_untranslated PASSED
+test/integration/test_matrix.py::test_fragments_unsupported_protocols_and_truncated_headers PASSED
+test/integration/test_matrix.py::test_ipv6_on_a_managed_interface_is_dropped PASSED
+test/integration/test_matrix.py::test_management_is_isolated_from_data_zones PASSED
+test/integration/test_matrix.py::test_counters_have_one_final_verdict_per_packet PASSED
+test/integration/test_matrix.py::test_no_op_reapply_keeps_flows PASSED
+test/integration/test_observe.py::test_metrics_are_meaningful PASSED
+test/integration/test_observe.py::test_collection_failure_is_not_reported_as_zero_traffic PASSED
+test/integration/test_observe.py::test_event_gap_is_recorded PASSED
+test/integration/test_observe.py::test_diagnose_tells_three_faults_apart PASSED
+test/integration/test_observe.py::test_kernel_log_is_clean PASSED
+
+======================== 26 passed in 603.14s (0:10:03) ========================

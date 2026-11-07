@@ -5,101 +5,112 @@ E2E_BEGIN
       6.17.0-42-generic
   $ ip -br addr
       lo               UNKNOWN        127.0.0.1/8 ::1/128 
-      r1@if3           UP             10.0.1.1/24 fe80::e897:5cff:fe73:6749/64 
-      r2@if5           UP             10.0.2.1/24 fe80::b818:c6ff:fe44:845c/64 
+      r1@if3           UP             10.0.1.1/24 fe80::b089:30ff:fee5:e1d7/64 
+      r2@if5           UP             10.0.2.1/24 fe80::a43d:4dff:fe36:5d6e/64 
   [PASS] baseline without firewall: client -> server tcp/80
-        OK 32 bytes echoed intact, local 10.0.1.2:39996
+        OK 32 bytes echoed intact, local 10.0.1.2:37790
 
 ======== 1. load the module ========
   [PASS] insmod myfw.ko (short udp/icmp timeouts for the test)
         
   [PASS] uapp status works
-        myfw module         loaded (protocol v2)
+        myfw module         loaded (UAPI v3)
+        generation          1
+        policy              hash initial, label "module load"
         default action      ACCEPT
+        zones               0
         filter rules        0
         NAT rules           0
         connections         0 / 16384
-        log entries         0 / 1000
         timeouts            tcp 300s, udp 5s, icmp 5s
-        packets             0 new accepted, 0 dropped, 0 stateful, 0 NATed
+        packets             0 accepted, 0 dropped, 0 stateful hits, 0 NAT rewrites
+        commits             0 (last gate 0.000 ms, 0 flows reset)
+        events              next seq 1
   $ sh -c dmesg | grep myfw
-      [    6.631710] myfw: loading out-of-tree module taints kernel.
-      [    6.631950] myfw: module verification failed: signature and/or required key missing - tainting kernel
-      [    6.638800] myfw: loaded (default ACCEPT, tcp 300s / udp 5s / icmp 5s)
+      [    6.117631] myfw: loading out-of-tree module taints kernel.
+      [    6.118066] myfw: module verification failed: signature and/or required key missing - tainting kernel
+      [    6.127484] myfw: loaded, UAPI 3, generation 1, default ACCEPT, max_conns 16384
 
 ======== 2. only root may control the firewall (was: any user) ========
   [PASS] status as nobody is refused
         error: permission denied: controlling the firewall needs root (CAP_NET_ADMIN)
   [PASS] rule add as nobody is refused
-        error: permission denied: controlling the firewall needs root (CAP_NET_ADMIN)
+        error: cannot read the active policy: permission denied: controlling the firewall needs root (CAP_NET_ADMIN)
   [PASS] ...and no rule was added
-        myfw module         loaded (protocol v2)
+        myfw module         loaded (UAPI v3)
+        generation          1
+        policy              hash initial, label "module load"
         default action      ACCEPT
+        zones               0
         filter rules        0
         NAT rules           0
         connections         0 / 16384
-        log entries         0 / 1000
         timeouts            tcp 300s, udp 5s, icmp 5s
-        packets             0 new accepted, 0 dropped, 0 stateful, 0 NATed
+        packets             0 accepted, 0 dropped, 0 stateful hits, 0 NAT rewrites
+        commits             0 (last gate 0.000 ms, 0 flows reset)
+        events              next seq 1
 
 ======== 3. default ACCEPT: everything flows ========
   [PASS] client -> server tcp/80
-        OK 32 bytes echoed intact, local 10.0.1.2:40012
+        OK 32 bytes echoed intact, local 10.0.1.2:37792
   [PASS] client -> server udp/9000
-        OK 32 bytes echoed intact, local 10.0.1.2:48985
+        OK 32 bytes echoed intact, local 10.0.1.2:56216
   [PASS] client -> server ping
         
 
 ======== 4. blacklist rule, protocol-aware, with logging ========
   [PASS] add drop rule for udp/9000
-        rule added
+        rule added: generation 2, 3 flow(s) reset
   [PASS] udp/9000 is now blocked
         FAIL timeout (sent 32, received 0 of 32)
   [PASS] tcp/9000 still works (proto)
-        OK 32 bytes echoed intact, local 10.0.1.2:38728
+        OK 32 bytes echoed intact, local 10.0.1.2:38452
   [PASS] udp/9001 still works (port)
-        OK 32 bytes echoed intact, local 10.0.1.2:44351
+        OK 32 bytes echoed intact, local 10.0.1.2:52429
   [PASS] log has the DROP with today's date (was: 1970)
-        [2026-10-24 13:04:40] DROP   udp         10.0.1.2:58548 -> 10.0.2.2:9000         len=40    rule=no-udp9000
+        [2026-11-07 18:50:11] DROP   udp         10.0.1.2:56425 -> 10.0.2.2:9000         len=40    rule=no-udp9000
   [PASS] rule hit counter counts the packet
-        #   name            source             sport       destination        dport       proto action log    packets        bytes
-        0   no-udp9000      any                any         10.0.2.2           9000        udp   drop   yes          1           40
+        #   name            source             sport       destination        dport       proto action log scope     zone        flows        bytes
+        0   no-udp9000      any                any         10.0.2.2           9000        udp   drop   yes any       -               1           40
+        (flows = new flows decided by the rule; later packets of a flow take the stateful path)
 
 ======== 5. rule order: first match wins, --head / --after ========
   [PASS] insert an accept rule for the client at the head
-        rule added
+        rule added: generation 3, 2 flow(s) reset
   [PASS] udp/9000 works again (accept matched first)
-        OK 32 bytes echoed intact, local 10.0.1.2:38397
+        OK 32 bytes echoed intact, local 10.0.1.2:39276
   [PASS] --after a rule that does not exist is refused
-        error: no rule with that name to insert after
+        error: no rule named nosuchrule
   [PASS] insert after allow-cli
-        rule added
+        rule added: generation 4, 1 flow(s) reset
   [PASS] order is allow-cli, mid, no-udp9000
-        #   name            source             sport       destination        dport       proto action log    packets        bytes
-        0   allow-cli       10.0.1.2           any         any                9000        udp   accept no           1           40
-        1   mid             any                any         any                1234        tcp   drop   no           0            0
-        2   no-udp9000      any                any         10.0.2.2           9000        udp   drop   yes          1           40
+        #   name            source             sport       destination        dport       proto action log scope     zone        flows        bytes
+        0   allow-cli       10.0.1.2           any         any                9000        udp   accept no  any       -               0            0
+        1   mid             any                any         any                1234        tcp   drop   no  any       -               0            0
+        2   no-udp9000      any                any         10.0.2.2           9000        udp   drop   yes any       -               0            0
+        (flows = new flows decided by the rule; later packets of a flow take the stateful path)
   [PASS] ...mid is second
-        #   name            source             sport       destination        dport       proto action log    packets        bytes
-        0   allow-cli       10.0.1.2           any         any                9000        udp   accept no           1           40
-        1   mid             any                any         any                1234        tcp   drop   no           0            0
-        2   no-udp9000      any                any         10.0.2.2           9000        udp   drop   yes          1           40
+        #   name            source             sport       destination        dport       proto action log scope     zone        flows        bytes
+        0   allow-cli       10.0.1.2           any         any                9000        udp   accept no  any       -               0            0
+        1   mid             any                any         any                1234        tcp   drop   no  any       -               0            0
+        2   no-udp9000      any                any         10.0.2.2           9000        udp   drop   yes any       -               0            0
+        (flows = new flows decided by the rule; later packets of a flow take the stateful path)
   [PASS] delete allow-cli
-        deleted 1 rule(s)
+        rule deleted: generation 5, 0 flow(s) reset
   [PASS] deleting it twice fails
-        error: no such rule
+        error: no rule named allow-cli
 
 ======== 6. whitelist (default DROP) and real stateful replies ========
   [PASS] flush rules
-        flushed 2 rule(s)
+        rules flushed: generation 6, 0 flow(s) reset
   [PASS] allow client net -> server tcp/80 only
-        rule added
+        rule added: generation 7, 0 flow(s) reset
   [PASS] default drop (logged)
-        default action is now DROP (logged)
+        default policy set: generation 8, 0 flow(s) reset
   [PASS] client -> server tcp/80 works: replies pass with NO reverse rule
-        OK 32 bytes echoed intact, local 10.0.1.2:40022
+        OK 32 bytes echoed intact, local 10.0.1.2:37802
   [PASS] large transfer (2 MB) over the tracked flow
-        OK 2000000 bytes echoed intact, local 10.0.1.2:40024
+        OK 2000000 bytes echoed intact, local 10.0.1.2:37808
   [PASS] client -> server tcp/8080 dropped
         FAIL connect timeout
   [PASS] client -> server ping dropped
@@ -108,88 +119,76 @@ E2E_BEGIN
         FAIL connect timeout
   [PASS] conn table shows the flow with reply packets
         proto original direction                            nat   expires  packets (orig/reply)
-        tcp   10.0.1.2:40022 -> 10.0.2.2:80                 -          5s   6/4
-        tcp   10.0.1.2:40024 -> 10.0.2.2:80                 -          5s   94/89
+        tcp   10.0.1.2:37802 -> 10.0.2.2:80                 -          5s   6/4
+        tcp   10.0.1.2:37808 -> 10.0.2.2:80                 -          5s   103/84
         2 connection(s)
   [PASS] default-policy drops are logged
-        [2026-10-24 13:04:43] DROP   tcp         10.0.1.2:54780 -> 10.0.2.2:8080         len=40    (default policy)
-        [2026-10-24 13:04:44] DROP   tcp         10.0.1.2:54780 -> 10.0.2.2:8080         len=40    (default policy)
-        [2026-10-24 13:04:45] DROP   icmp              10.0.1.2 -> 10.0.2.2              len=64    (default policy)
-        [2026-10-24 13:04:46] DROP   tcp         10.0.2.2:59080 -> 10.0.1.2:2222         len=40    (default policy)
-        [2026-10-24 13:04:47] DROP   tcp         10.0.2.2:59080 -> 10.0.1.2:2222         len=40    (default policy)
+        [2026-11-07 18:50:14] DROP   tcp         10.0.1.2:32890 -> 10.0.2.2:8080         len=40    (default policy)
+        [2026-11-07 18:50:15] DROP   tcp         10.0.1.2:32890 -> 10.0.2.2:8080         len=40    (default policy)
+        [2026-11-07 18:50:16] DROP   icmp              10.0.1.2 -> 10.0.2.2              len=64    (default policy)
+        [2026-11-07 18:50:17] DROP   tcp         10.0.2.2:48368 -> 10.0.1.2:2222         len=40    (default policy)
+        [2026-11-07 18:50:18] DROP   tcp         10.0.2.2:48368 -> 10.0.1.2:2222         len=40    (default policy)
 
 ======== 6b. traffic from the firewall host itself (LOCAL_OUT hook) ========
   [PASS] router -> server tcp/80 dropped (rule only allows the client net)
         FAIL connect timeout
   [PASS] allow the router's own address
-        rule added
+        rule added: generation 9, 2 flow(s) reset
   [PASS] router -> server tcp/80 works
-        OK 32 bytes echoed intact, local 10.0.2.1:37012
+        OK 32 bytes echoed intact, local 10.0.2.1:60796
 
 ======== 7. connection timeout (udp_timeout=5) ========
   [PASS] allow udp/9001
-        rule added
+        rule added: generation 10, 1 flow(s) reset
   [PASS] client -> server udp/9001
-        OK 32 bytes echoed intact, local 10.0.1.2:43938
+        OK 32 bytes echoed intact, local 10.0.1.2:45574
   [PASS] the udp flow is tracked
         proto original direction                            nat   expires  packets (orig/reply)
-        tcp   10.0.1.2:40022 -> 10.0.2.2:80                 -          3s   6/4
-        tcp   10.0.1.2:40024 -> 10.0.2.2:80                 -          3s   94/89
-        tcp   10.0.2.1:37012 -> 10.0.2.2:80                 -         10s   6/4
-        udp   10.0.1.2:43938 -> 10.0.2.2:9001               -          5s   1/1
-        4 connection(s)
-  [PASS] after 7s idle it has expired
-        proto original direction                            nat   expires  packets (orig/reply)
-        tcp   10.0.2.1:37012 -> 10.0.2.2:80                 -          3s   6/4
+        udp   10.0.1.2:45574 -> 10.0.2.2:9001               -          5s   1/1
         1 connection(s)
+  [PASS] after 7s idle it has expired
+        no connections
 
 ======== 8. a new DROP rule cuts flows that are already established ========
   [PASS] client -> server udp/9001 (flow established)
-        OK 32 bytes echoed intact, local 10.0.1.2:59814
+        OK 32 bytes echoed intact, local 10.0.1.2:39077
   [PASS] add drop rule for udp/9001 at the head
-        rule added
+        rule added: generation 11, 1 flow(s) reset
   [PASS] the existing flow was removed
-        proto original direction                            nat   expires  packets (orig/reply)
-        tcp   10.0.2.1:37012 -> 10.0.2.2:80                 -          3s   6/4
-        1 connection(s)
+        no connections
   [PASS] udp/9001 now blocked
         FAIL timeout (sent 32, received 0 of 32)
 
 ======== 9. save / load ========
   [PASS] save ruleset
-        saved 4 rule(s) and 0 NAT rule(s) to /tmp/rules.fw
+        saved 0 zone(s), 4 rule(s) and 0 NAT rule(s) of generation 11 to /tmp/rules.fw
   $ cat /tmp/rules.fw
-      # myfw ruleset saved Sat Oct 24 13:05:00 2026
+      # myfw ruleset saved Sat Nov  7 18:50:31 2026
       rule default drop --log
       rule add --name cut9001 --src any --dst any --sport any --dport 9001 --proto udp --action drop
       rule add --name web --src 10.0.1.0/24 --dst 10.0.2.2 --sport any --dport 80 --proto tcp --action accept --log
       rule add --name router --src 10.0.2.1 --dst any --sport any --dport any --proto any --action accept
       rule add --name u9001 --src any --dst any --sport any --dport 9001 --proto udp --action accept
   [PASS] flush
-        flushed 4 rule(s)
+        rules flushed: generation 12, 0 flow(s) reset
   [PASS] nothing left
         no rules
   [PASS] load it back
-        flushed 0 rule(s)
-        flushed 0 NAT rule(s)
-        default action is now DROP (logged)
-        rule added
-        rule added
-        rule added
-        rule added
-        loaded 5 command(s) from /tmp/rules.fw, 0 failed
+        ruleset loaded: generation 13, 0 flow(s) reset
+        loaded 5 command(s) from /tmp/rules.fw as one generation
   [PASS] restored ruleset is identical
         
   $ /fw/uapp rule ls
-      #   name            source             sport       destination        dport       proto action log    packets        bytes
-      0   cut9001         any                any         any                9001        udp   drop   no           0            0
-      1   web             10.0.1.0/24        any         10.0.2.2           80          tcp   accept yes          0            0
-      2   router          10.0.2.1           any         any                any         any   accept no           0            0
-      3   u9001           any                any         any                9001        udp   accept no           0            0
+      #   name            source             sport       destination        dport       proto action log scope     zone        flows        bytes
+      0   cut9001         any                any         any                9001        udp   drop   no  any       -               0            0
+      1   web             10.0.1.0/24        any         10.0.2.2           80          tcp   accept yes any       -               0            0
+      2   router          10.0.2.1           any         any                any         any   accept no  any       -               0            0
+      3   u9001           any                any         any                9001        udp   accept no  any       -               0            0
+      (flows = new flows decided by the rule; later packets of a flow take the stateful path)
 
 ======== 10. interactive mode (kept from the original) ========
   [PASS] rule add with answers on stdin
-        insert after rule (empty = end of chain, ^ = top) []: rule name []: source ip/mask [any]: source ports (80, 8000-8100, any) [any]: destination ip/mask [any]: destination ports [any]: protocol (tcp/udp/icmp/any) [any]: action (accept/drop) [drop]: log matching packets (yes/no) [no]: rule added
+        insert after rule (empty = end of chain, ^ = top) []: rule name []: source ip/mask [any]: source ports (80, 8000-8100, any) [any]: destination ip/mask [any]: destination ports [any]: protocol (tcp/udp/icmp/any) [any]: action (accept/drop) [drop]: log matching packets (yes/no) [no]: rule added: generation 14, 0 flow(s) reset
   [PASS] ping now allowed by the interactive rule
         
 
@@ -202,122 +201,612 @@ E2E_BEGIN
         error: invalid port range '90-80'
   [PASS] bad protocol
         error: invalid protocol 'xyz'
-  [PASS] name too long
-        error: rule name must be 1-15 characters
+  [PASS] name too long (v2: ids up to 63 chars)
+        error: rule name must be 1-63 characters of A-Z a-z 0-9 . _ : -
+  [PASS] name with a space (would break save/load)
+        error: rule name must be 1-63 characters of A-Z a-z 0-9 . _ : -
+  [PASS] nat del with an empty number
+        error: no NAT rule number '' (see uapp nat ls)
   [PASS] missing --action
         error: --name and --action are required
   [PASS] delete NAT rule 99
-        error: no NAT rule with that number
+        error: no NAT rule number '99' (see uapp nat ls)
+
+======== 11b. stress: parallel traffic while 300 commits replace the policy ========
+        OK 4000000 bytes echoed intact, local 10.0.1.2:59640
+        OK 4000000 bytes echoed intact, local 10.0.1.2:59642
+        OK 4000000 bytes echoed intact, local 10.0.1.2:59636
+        OK 4000000 bytes echoed intact, local 10.0.1.2:59638
+  [PASS] 4 x 4 MB transfers intact during 300 commits + 450 dumps
+  [PASS] rule chain is back to empty
+        myfw module         loaded (UAPI v3)
+        generation          316
+        policy              hash legacy-2a16a42511853fe974563114, label "uapp rule deleted"
+        default action      ACCEPT
+        zones               0
+        filter rules        0
+        NAT rules           0
+        connections         0 / 16384
+        timeouts            tcp 300s, udp 5s, icmp 5s
+        packets             2190 accepted, 43 dropped, 2141 stateful hits, 0 NAT rewrites
+        commits             315 (last gate 0.407 ms, 0 flows reset)
+        events              next seq 326
 
 ======== 12. SNAT (masquerade the client network) ========
   [PASS] back to default accept, clear rules and logs
-        flushed 5 rule(s)
-        default action is now ACCEPT
-        logs cleared
+        rules flushed: generation 317, 0 flow(s) reset
+        default policy set: generation 318, 0 flow(s) reset
+        log cleared (events before seq 328 are hidden from 'uapp log')
   (server no longer has a route back to 10.0.1.0/24)
   [PASS] without NAT the server cannot answer the client
         FAIL connect timeout
   [PASS] add SNAT 10.0.1.0/24 -> 10.0.2.1 ports 20000-20999
-        NAT rule added
+        NAT rule added: generation 319, 1 flow(s) reset
   [PASS] client -> server tcp/80 works through SNAT
-        OK 32 bytes echoed intact, local 10.0.1.2:54466
+        OK 32 bytes echoed intact, local 10.0.1.2:60382
   [PASS] server saw the NAT address and a port from the pool
-        10.0.2.1:20284
+        10.0.2.1:20440
   [PASS] client -> server udp/9000 through SNAT
-        OK 32 bytes echoed intact, local 10.0.1.2:54032
+        OK 32 bytes echoed intact, local 10.0.1.2:41708
   [PASS] server saw 10.0.2.1 for udp too
-        10.0.2.1:20116
+        10.0.2.1:20951
   [PASS] ping through SNAT
         
   [PASS] 8 MB echo through SNAT, every byte verified (checksums, GSO)
-        OK 8000000 bytes echoed intact, local 10.0.1.2:54480
+        OK 8000000 bytes echoed intact, local 10.0.1.2:60384
   [PASS] conn shows the SNAT reply tuple
         proto original direction                            nat   expires  packets (orig/reply)
-        tcp   10.0.1.2:54458 -> 10.0.2.2:80                 -        299s   2/0
-        tcp   10.0.1.2:54466 -> 10.0.2.2:80                 SNAT      10s   6/4
-              reply: 10.0.2.2:80 -> 10.0.2.1:20284
-        udp   10.0.1.2:54032 -> 10.0.2.2:9000               SNAT       5s   1/1
-              reply: 10.0.2.2:9000 -> 10.0.2.1:20116
+        tcp   10.0.1.2:60382 -> 10.0.2.2:80                 SNAT      10s   6/4
+              reply: 10.0.2.2:80 -> 10.0.2.1:20440
+        udp   10.0.1.2:41708 -> 10.0.2.2:9000               SNAT       5s   1/1
+              reply: 10.0.2.2:9000 -> 10.0.2.1:20951
         icmp  10.0.1.2 -> 10.0.2.2                          SNAT       5s   1/1
               reply: 10.0.2.2 -> 10.0.2.1
-        tcp   10.0.1.2:54480 -> 10.0.2.2:80                 SNAT      10s   309/270
-              reply: 10.0.2.2:80 -> 10.0.2.1:20487
-        5 connection(s)
+        tcp   10.0.1.2:60384 -> 10.0.2.2:80                 SNAT      10s   266/277
+              reply: 10.0.2.2:80 -> 10.0.2.1:20921
+        4 connection(s)
 
-======== 12b. stress: parallel NAT traffic while rules change underneath ========
-        OK 4000000 bytes echoed intact, local 10.0.1.2:54490
-        OK 4000000 bytes echoed intact, local 10.0.1.2:54492
-        OK 4000000 bytes echoed intact, local 10.0.1.2:54520
-        OK 4000000 bytes echoed intact, local 10.0.1.2:54504
-  [PASS] 4 x 4 MB transfers intact during 150 rule add/del + 450 dumps
-  [PASS] rule chain is back to empty
-        myfw module         loaded (protocol v2)
-        default action      ACCEPT
-        filter rules        0
-        NAT rules           1
-        connections         7 / 16384
-        log entries         0 / 1000
-        timeouts            tcp 300s, udp 5s, icmp 5s
-        packets             25 new accepted, 9 dropped, 2517 stateful, 2303 NATed
+======== 12b. commits during SNAT traffic (v2 semantics) ========
+  [PASS] no corrupted transfer while 40 commits reset NAT flows
+  [PASS] a new SNAT connection works right after the churn
+        OK 32 bytes echoed intact, local 10.0.1.2:60432
+  [PASS] server only ever saw the NAT address
+        10.0.2.1:20658
 
 ======== 13. DNAT (port forwarding into the client network) ========
   [PASS] forward 10.0.2.1:8080/tcp -> 10.0.1.2:2222
-        NAT rule added
+        NAT rule added: generation 360, 2 flow(s) reset
   [PASS] forward 10.0.2.1:5353/udp -> 10.0.1.2:9500
-        NAT rule added
+        NAT rule added: generation 361, 0 flow(s) reset
   [PASS] server -> 10.0.2.1:8080 reaches the client's tcp/2222
-        OK 32 bytes echoed intact, local 10.0.2.2:55034
+        OK 32 bytes echoed intact, local 10.0.2.2:47774
   [PASS] client saw the real external address
-        10.0.2.2:55034
+        10.0.2.2:47774
   [PASS] 8 MB echo through DNAT, every byte verified
-        OK 8000000 bytes echoed intact, local 10.0.2.2:55050
+        OK 8000000 bytes echoed intact, local 10.0.2.2:47786
   [PASS] server -> 10.0.2.1:5353/udp reaches the client's udp/9500
-        OK 32 bytes echoed intact, local 10.0.2.2:59205
+        OK 32 bytes echoed intact, local 10.0.2.2:33483
   [PASS] conn shows the DNAT reply tuple
         proto original direction                            nat   expires  packets (orig/reply)
-        tcp   10.0.1.2:54458 -> 10.0.2.2:80                 -        290s   2/0
-        tcp   10.0.1.2:54466 -> 10.0.2.2:80                 SNAT       2s   6/4
-              reply: 10.0.2.2:80 -> 10.0.2.1:20284
-        tcp   10.0.1.2:54480 -> 10.0.2.2:80                 SNAT       2s   309/270
-              reply: 10.0.2.2:80 -> 10.0.2.1:20487
-        tcp   10.0.1.2:54490 -> 10.0.2.2:80                 SNAT       3s   190/231
-              reply: 10.0.2.2:80 -> 10.0.2.1:20366
-        tcp   10.0.1.2:54492 -> 10.0.2.2:80                 SNAT       3s   215/183
-              reply: 10.0.2.2:80 -> 10.0.2.1:20935
-        tcp   10.0.1.2:54504 -> 10.0.2.2:80                 SNAT       3s   256/181
-              reply: 10.0.2.2:80 -> 10.0.2.1:20803
-        tcp   10.0.1.2:54520 -> 10.0.2.2:80                 SNAT       3s   264/182
-              reply: 10.0.2.2:80 -> 10.0.2.1:20195
-        tcp   10.0.2.2:55034 -> 10.0.2.1:8080               DNAT      10s   6/4
-              reply: 10.0.1.2:2222 -> 10.0.2.2:55034
-        tcp   10.0.2.2:55050 -> 10.0.2.1:8080               DNAT      10s   280/313
-              reply: 10.0.1.2:2222 -> 10.0.2.2:55050
-        udp   10.0.2.2:59205 -> 10.0.2.1:5353               DNAT       5s   1/1
-              reply: 10.0.1.2:9500 -> 10.0.2.2:59205
-        10 connection(s)
+        tcp   10.0.2.2:47774 -> 10.0.2.1:8080               DNAT      10s   6/4
+              reply: 10.0.1.2:2222 -> 10.0.2.2:47774
+        tcp   10.0.2.2:47786 -> 10.0.2.1:8080               DNAT      10s   255/260
+              reply: 10.0.1.2:2222 -> 10.0.2.2:47786
+        udp   10.0.2.2:33483 -> 10.0.2.1:5353               DNAT       5s   1/1
+              reply: 10.0.1.2:9500 -> 10.0.2.2:33483
+        3 connection(s)
   $ /fw/uapp nat ls
-      0   SNAT  from 10.0.1.0/24        -> source 10.0.2.1 ports 20000-20999   (12 flows)
-      1   DNAT  tcp 10.0.2.1:8080         -> 10.0.1.2:2222   (2 flows)
-      2   DNAT  udp 10.0.2.1:5353         -> 10.0.1.2:9500   (1 flows)
+      0   SNAT  nat0         from 10.0.1.0/24        -> source 10.0.2.1 ports 20000-20999
+      1   DNAT  nat1         tcp 10.0.2.1:8080         -> 10.0.1.2:2222
+      2   DNAT  nat2         udp 10.0.2.1:5353         -> 10.0.1.2:9500
   [PASS] delete NAT rule 0 (the SNAT)
-        NAT rule deleted
+        NAT rule deleted: generation 362, 3 flow(s) reset
   [PASS] client -> server fails again without SNAT
         FAIL connect timeout
   [PASS] flush NAT
-        flushed 2 NAT rule(s)
+        NAT rules flushed: generation 363, 1 flow(s) reset
   [PASS] no NAT rules left
         no NAT rules
 
+======== 13b. v2: transactional policy (generations, staging, conflicts) ========
+  [PASS] uapp and the module agree on every structure size
+        {"uapi_version": 3, "module": [16, 16, 144, 176, 152, 96, 112, 40, 8, 8, 96, 304, 488, 80, 144, 112], "uapp": [16, 16, 144, 176, 152, 96, 112, 40, 8, 8, 96, 304, 488, 80, 144, 112]}
+  [PASS] policy export is complete (SHA-256 checked)
+        exported generation 363 (176 bytes, complete)
+  [PASS] re-applying the same blob with the right generation works
+        committed generation 364 (gate 0.734 ms, 0 flow(s) reset)
+  [PASS] generation went 363 -> 364
+  [PASS] a commit that expects an old generation is refused
+        error: generation conflict: expected 363, active is 364
+  [PASS] ...with a conflict error
+        error: generation conflict: expected 363, active is 364
+  [PASS] a truncated/garbled candidate is refused
+        error: candidate size 100 out of range (max 65536)
+  [PASS] a zone on a missing interface is refused by the kernel
+        error: zone ghost: interface nosuchif0 does not exist
+  [PASS] active generation unchanged after 4 refused candidates
+  [PASS] a candidate abandoned half-way (uapp exits after 1 chunk)
+        error: stopped after 1 chunk(s) (test hook)
+  [PASS] ...is released by the kernel (no candidate staged)
+        {"uapi_version": 3, "generation": 364, "default_action": "accept", "default_log": false, "managed": false, "legacy": true, "gate": 0, "zones": 0, "rules": 0, "nats": 0, "conns": 0, "max_conns": 16384, "tcp_timeout": 300, "udp_timeout": 5, "icmp_timeout": 5, "stage_state": 0, "stage_bytes": 0, "commits": 363, "last_gate_ns": 733677, "last_commit_ns": 1794077450238313132, "last_flows_reset": 0, "event_next_seq": 378, "policy_hash": "legacy-c8c75816f5cf61d2998534ec", "label": "uapp NAT rules flushed", "blob_sha256": "c68773c1dd5d9e5ad0e6e10ce719c691ffdd86d8bf5c46da44759a205e95ee0a"}
+  [PASS] ...and recorded as an aborted staging
+             1 [2026-11-07 18:50:11] COMMIT           gen 2 legacy-f84cda6fd315d675a9c0aca4
+             2 [2026-11-07 18:50:11] DROP   udp         10.0.1.2:56425 -> 10.0.2.2:9000         reason=rule no-udp9000
+             3 [2026-11-07 18:50:13] COMMIT           gen 3 legacy-d87c25817e3846322af6b356
+             4 [2026-11-07 18:50:13] COMMIT           gen 4 legacy-4dd521185e280892888862a4
+             5 [2026-11-07 18:50:14] COMMIT           gen 5 legacy-9e734699d324c1a13a2f7358
+             6 [2026-11-07 18:50:14] COMMIT           gen 6 legacy-dca5a479b8bc2dc3766eeaa0
+             7 [2026-11-07 18:50:14] COMMIT           gen 7 legacy-7d3341409cc0810239891bfa
+             8 [2026-11-07 18:50:14] COMMIT           gen 8 legacy-4097f70acdfb0f935ec75c34
+             9 [2026-11-07 18:50:14] ACCEPT tcp         10.0.1.2:37802 -> 10.0.2.2:80           reason=none web
+            10 [2026-11-07 18:50:14] ACCEPT tcp         10.0.1.2:37808 -> 10.0.2.2:80           reason=none web
+            11 [2026-11-07 18:50:14] DROP   tcp         10.0.1.2:32890 -> 10.0.2.2:8080         reason=default_policy 
+            12 [2026-11-07 18:50:15] DROP   tcp         10.0.1.2:32890 -> 10.0.2.2:8080         reason=default_policy 
+            13 [2026-11-07 18:50:16] DROP   icmp              10.0.1.2 -> 10.0.2.2              reason=default_policy 
+            14 [2026-11-07 18:50:17] DROP   tcp         10.0.2.2:48368 -> 10.0.1.2:2222         reason=default_policy 
+            15 [2026-11-07 18:50:18] DROP   tcp         10.0.2.2:48368 -> 10.0.1.2:2222         reason=default_policy 
+            16 [2026-11-07 18:50:19] DROP   tcp         10.0.2.1:60786 -> 10.0.2.2:80           reason=default_policy 
+            17 [2026-11-07 18:50:20] DROP   tcp         10.0.2.1:60786 -> 10.0.2.2:80           reason=default_policy 
+            18 [2026-11-07 18:50:21] COMMIT           gen 9 legacy-2b41a75de441096c7557c6d5
+            19 [2026-11-07 18:50:22] COMMIT           gen 10 legacy-b9a2b6f27659481d08dacd06
+            20 [2026-11-07 18:50:29] COMMIT           gen 11 legacy-6db59354b368dd4e503d40b7
+            21 [2026-11-07 18:50:31] COMMIT           gen 12 legacy-cbb33125fbeb579894fe233c
+            22 [2026-11-07 18:50:31] COMMIT           gen 13 legacy-f692f9b57785c3149d8eacb7
+            23 [2026-11-07 18:50:31] COMMIT           gen 14 legacy-6f8ff08f2f79db5dac51149b
+            24 [2026-11-07 18:50:32] COMMIT           gen 15 legacy-cbb33125fbeb579894fe233c
+            25 [2026-11-07 18:50:32] COMMIT           gen 16 legacy-e6d966230f1db9f7112e6956
+            26 [2026-11-07 18:50:32] COMMIT           gen 17 legacy-e8ff9967372d960bcd63fb1c
+            27 [2026-11-07 18:50:32] COMMIT           gen 18 legacy-2a16a42511853fe974563114
+            28 [2026-11-07 18:50:32] COMMIT           gen 19 legacy-145d073be568b2465a75b2f5
+            29 [2026-11-07 18:50:32] COMMIT           gen 20 legacy-2a16a42511853fe974563114
+            30 [2026-11-07 18:50:32] COMMIT           gen 21 legacy-dbb6692dae0bb4fd498e8865
+            31 [2026-11-07 18:50:32] COMMIT           gen 22 legacy-2a16a42511853fe974563114
+            32 [2026-11-07 18:50:32] COMMIT           gen 23 legacy-a969dd56df816f7ed721d8a9
+            33 [2026-11-07 18:50:32] COMMIT           gen 24 legacy-2a16a42511853fe974563114
+            34 [2026-11-07 18:50:32] COMMIT           gen 25 legacy-811fba8681dd1aad2c4fa2b1
+            35 [2026-11-07 18:50:32] COMMIT           gen 26 legacy-2a16a42511853fe974563114
+            36 [2026-11-07 18:50:32] COMMIT           gen 27 legacy-8bd5877127f0abe4a9ec3b1b
+            37 [2026-11-07 18:50:32] COMMIT           gen 28 legacy-2a16a42511853fe974563114
+            38 [2026-11-07 18:50:32] COMMIT           gen 29 legacy-d332e875489d1ff1ad9e8601
+            39 [2026-11-07 18:50:32] COMMIT           gen 30 legacy-2a16a42511853fe974563114
+            40 [2026-11-07 18:50:33] COMMIT           gen 31 legacy-f10936c0eb8935d5ef48d374
+            41 [2026-11-07 18:50:33] COMMIT           gen 32 legacy-2a16a42511853fe974563114
+            42 [2026-11-07 18:50:33] COMMIT           gen 33 legacy-04e6e3c9b6baf5b19450da7b
+            43 [2026-11-07 18:50:33] COMMIT           gen 34 legacy-2a16a42511853fe974563114
+            44 [2026-11-07 18:50:33] COMMIT           gen 35 legacy-2e87afd8b1964395591df56c
+            45 [2026-11-07 18:50:33] COMMIT           gen 36 legacy-2a16a42511853fe974563114
+            46 [2026-11-07 18:50:33] COMMIT           gen 37 legacy-08d99a1f884c4b73755be5bb
+            47 [2026-11-07 18:50:33] COMMIT           gen 38 legacy-2a16a42511853fe974563114
+            48 [2026-11-07 18:50:33] COMMIT           gen 39 legacy-76b3619f4aeaf55a41dc9be1
+            49 [2026-11-07 18:50:33] COMMIT           gen 40 legacy-2a16a42511853fe974563114
+            50 [2026-11-07 18:50:33] COMMIT           gen 41 legacy-3753942b987ca641db90f168
+            51 [2026-11-07 18:50:33] COMMIT           gen 42 legacy-2a16a42511853fe974563114
+            52 [2026-11-07 18:50:33] COMMIT           gen 43 legacy-67838803940f777f2e1d51c9
+            53 [2026-11-07 18:50:33] COMMIT           gen 44 legacy-2a16a42511853fe974563114
+            54 [2026-11-07 18:50:33] COMMIT           gen 45 legacy-a6a4141da2c9a4bd14be2c72
+            55 [2026-11-07 18:50:33] COMMIT           gen 46 legacy-2a16a42511853fe974563114
+            56 [2026-11-07 18:50:33] COMMIT           gen 47 legacy-94d533e90c59ca5e409cd9b7
+            57 [2026-11-07 18:50:33] COMMIT           gen 48 legacy-2a16a42511853fe974563114
+            58 [2026-11-07 18:50:33] COMMIT           gen 49 legacy-39017799bd05ef178bd078d6
+            59 [2026-11-07 18:50:33] COMMIT           gen 50 legacy-2a16a42511853fe974563114
+            60 [2026-11-07 18:50:33] COMMIT           gen 51 legacy-f902dfc3bc68b8c009fc5b28
+            61 [2026-11-07 18:50:33] COMMIT           gen 52 legacy-2a16a42511853fe974563114
+            62 [2026-11-07 18:50:33] COMMIT           gen 53 legacy-1dccc78f90c533c01b4a6925
+            63 [2026-11-07 18:50:33] COMMIT           gen 54 legacy-2a16a42511853fe974563114
+            64 [2026-11-07 18:50:33] COMMIT           gen 55 legacy-f8f237f6b061c6282a8e838c
+            65 [2026-11-07 18:50:33] COMMIT           gen 56 legacy-2a16a42511853fe974563114
+            66 [2026-11-07 18:50:33] COMMIT           gen 57 legacy-ae39dc1bcbeea3d75483fab7
+            67 [2026-11-07 18:50:33] COMMIT           gen 58 legacy-2a16a42511853fe974563114
+            68 [2026-11-07 18:50:33] COMMIT           gen 59 legacy-26f87aa73878d8b85b81c289
+            69 [2026-11-07 18:50:34] COMMIT           gen 60 legacy-2a16a42511853fe974563114
+            70 [2026-11-07 18:50:34] COMMIT           gen 61 legacy-471bd805c8288558b206c188
+            71 [2026-11-07 18:50:34] COMMIT           gen 62 legacy-2a16a42511853fe974563114
+            72 [2026-11-07 18:50:34] COMMIT           gen 63 legacy-0c0572490b824851fc4d7f0c
+            73 [2026-11-07 18:50:34] COMMIT           gen 64 legacy-2a16a42511853fe974563114
+            74 [2026-11-07 18:50:34] COMMIT           gen 65 legacy-78ad30bedf6fbc2006c56edc
+            75 [2026-11-07 18:50:34] COMMIT           gen 66 legacy-2a16a42511853fe974563114
+            76 [2026-11-07 18:50:34] COMMIT           gen 67 legacy-d850bdc1a15857bbb1024bb8
+            77 [2026-11-07 18:50:34] COMMIT           gen 68 legacy-2a16a42511853fe974563114
+            78 [2026-11-07 18:50:34] COMMIT           gen 69 legacy-f3fcb25cca61195e36028005
+            79 [2026-11-07 18:50:34] COMMIT           gen 70 legacy-2a16a42511853fe974563114
+            80 [2026-11-07 18:50:34] COMMIT           gen 71 legacy-df3812d28ea5ee111daa8f4d
+            81 [2026-11-07 18:50:34] COMMIT           gen 72 legacy-2a16a42511853fe974563114
+            82 [2026-11-07 18:50:34] COMMIT           gen 73 legacy-27551396d35ad7e4f5df0721
+            83 [2026-11-07 18:50:34] COMMIT           gen 74 legacy-2a16a42511853fe974563114
+            84 [2026-11-07 18:50:34] COMMIT           gen 75 legacy-3cff1218cdff45ca0b51aa1f
+            85 [2026-11-07 18:50:34] COMMIT           gen 76 legacy-2a16a42511853fe974563114
+            86 [2026-11-07 18:50:35] COMMIT           gen 77 legacy-a455c4aa7258bd115985e2f6
+            87 [2026-11-07 18:50:35] COMMIT           gen 78 legacy-2a16a42511853fe974563114
+            88 [2026-11-07 18:50:35] COMMIT           gen 79 legacy-86a5fba28fff302e0fe33512
+            89 [2026-11-07 18:50:35] COMMIT           gen 80 legacy-2a16a42511853fe974563114
+            90 [2026-11-07 18:50:35] COMMIT           gen 81 legacy-9e353e70fa2e43ce2eeb320a
+            91 [2026-11-07 18:50:35] COMMIT           gen 82 legacy-2a16a42511853fe974563114
+            92 [2026-11-07 18:50:35] COMMIT           gen 83 legacy-99b5b7298345fed952e2ac5b
+            93 [2026-11-07 18:50:35] COMMIT           gen 84 legacy-2a16a42511853fe974563114
+            94 [2026-11-07 18:50:35] COMMIT           gen 85 legacy-1aa08213430b491762a1c580
+            95 [2026-11-07 18:50:35] COMMIT           gen 86 legacy-2a16a42511853fe974563114
+            96 [2026-11-07 18:50:35] COMMIT           gen 87 legacy-3768872d2ba34bd32469b60a
+            97 [2026-11-07 18:50:35] COMMIT           gen 88 legacy-2a16a42511853fe974563114
+            98 [2026-11-07 18:50:35] COMMIT           gen 89 legacy-04d3c54cfa87611651955a47
+            99 [2026-11-07 18:50:35] COMMIT           gen 90 legacy-2a16a42511853fe974563114
+           100 [2026-11-07 18:50:35] COMMIT           gen 91 legacy-0c4920ae69b4c7d6b7ceedad
+           101 [2026-11-07 18:50:35] COMMIT           gen 92 legacy-2a16a42511853fe974563114
+           102 [2026-11-07 18:50:35] COMMIT           gen 93 legacy-39b3039f66d5baa20c6a0c6d
+           103 [2026-11-07 18:50:35] COMMIT           gen 94 legacy-2a16a42511853fe974563114
+           104 [2026-11-07 18:50:35] COMMIT           gen 95 legacy-5407ec43de5e1be491aff015
+           105 [2026-11-07 18:50:35] COMMIT           gen 96 legacy-2a16a42511853fe974563114
+           106 [2026-11-07 18:50:35] COMMIT           gen 97 legacy-0a9a15e5324f4c5a9bfe0759
+           107 [2026-11-07 18:50:35] COMMIT           gen 98 legacy-2a16a42511853fe974563114
+           108 [2026-11-07 18:50:35] COMMIT           gen 99 legacy-ff0ce2f948c47946cf43d3d6
+           109 [2026-11-07 18:50:35] COMMIT           gen 100 legacy-2a16a42511853fe974563114
+           110 [2026-11-07 18:50:35] COMMIT           gen 101 legacy-36b61e0339ff8d1a188a18d5
+           111 [2026-11-07 18:50:35] COMMIT           gen 102 legacy-2a16a42511853fe974563114
+           112 [2026-11-07 18:50:35] COMMIT           gen 103 legacy-72098282b610b58f449f2637
+           113 [2026-11-07 18:50:35] COMMIT           gen 104 legacy-2a16a42511853fe974563114
+           114 [2026-11-07 18:50:35] COMMIT           gen 105 legacy-0b6aa5a5d8e7535a9d3d29ed
+           115 [2026-11-07 18:50:35] COMMIT           gen 106 legacy-2a16a42511853fe974563114
+           116 [2026-11-07 18:50:35] COMMIT           gen 107 legacy-fe14323a05ba890d429e5b0e
+           117 [2026-11-07 18:50:35] COMMIT           gen 108 legacy-2a16a42511853fe974563114
+           118 [2026-11-07 18:50:35] COMMIT           gen 109 legacy-b2e9392dcb4adae92da22221
+           119 [2026-11-07 18:50:35] COMMIT           gen 110 legacy-2a16a42511853fe974563114
+           120 [2026-11-07 18:50:36] COMMIT           gen 111 legacy-d075c301b8b15cfba2b82fa8
+           121 [2026-11-07 18:50:36] COMMIT           gen 112 legacy-2a16a42511853fe974563114
+           122 [2026-11-07 18:50:36] COMMIT           gen 113 legacy-9891b6fe078845653e90af25
+           123 [2026-11-07 18:50:36] COMMIT           gen 114 legacy-2a16a42511853fe974563114
+           124 [2026-11-07 18:50:36] COMMIT           gen 115 legacy-0e0e4c470bcf12b196db7ef8
+           125 [2026-11-07 18:50:36] COMMIT           gen 116 legacy-2a16a42511853fe974563114
+           126 [2026-11-07 18:50:36] COMMIT           gen 117 legacy-509d9195a51f7e8e17207890
+           127 [2026-11-07 18:50:36] COMMIT           gen 118 legacy-2a16a42511853fe974563114
+           128 [2026-11-07 18:50:36] COMMIT           gen 119 legacy-0ef171a7156898c66c788a4e
+           129 [2026-11-07 18:50:36] COMMIT           gen 120 legacy-2a16a42511853fe974563114
+           130 [2026-11-07 18:50:36] COMMIT           gen 121 legacy-9f50f364a37cfe25dae5281c
+           131 [2026-11-07 18:50:36] COMMIT           gen 122 legacy-2a16a42511853fe974563114
+           132 [2026-11-07 18:50:36] COMMIT           gen 123 legacy-9808df2fd77531750fb3c320
+           133 [2026-11-07 18:50:36] COMMIT           gen 124 legacy-2a16a42511853fe974563114
+           134 [2026-11-07 18:50:36] COMMIT           gen 125 legacy-46dd6353ca35d881e3100597
+           135 [2026-11-07 18:50:36] COMMIT           gen 126 legacy-2a16a42511853fe974563114
+           136 [2026-11-07 18:50:36] COMMIT           gen 127 legacy-136433dda8dff4c4cd69e6bd
+           137 [2026-11-07 18:50:36] COMMIT           gen 128 legacy-2a16a42511853fe974563114
+           138 [2026-11-07 18:50:36] COMMIT           gen 129 legacy-23db60249b979070c166c205
+           139 [2026-11-07 18:50:36] COMMIT           gen 130 legacy-2a16a42511853fe974563114
+           140 [2026-11-07 18:50:36] COMMIT           gen 131 legacy-ad172875ca2b917d685c9b6a
+           141 [2026-11-07 18:50:36] COMMIT           gen 132 legacy-2a16a42511853fe974563114
+           142 [2026-11-07 18:50:36] COMMIT           gen 133 legacy-349c93a540117d2e5d0acdeb
+           143 [2026-11-07 18:50:36] COMMIT           gen 134 legacy-2a16a42511853fe974563114
+           144 [2026-11-07 18:50:36] COMMIT           gen 135 legacy-1569e3a398e1d130410d4f26
+           145 [2026-11-07 18:50:36] COMMIT           gen 136 legacy-2a16a42511853fe974563114
+           146 [2026-11-07 18:50:36] COMMIT           gen 137 legacy-b95e72da814bf32886c73e6e
+           147 [2026-11-07 18:50:36] COMMIT           gen 138 legacy-2a16a42511853fe974563114
+           148 [2026-11-07 18:50:36] COMMIT           gen 139 legacy-0269f99dcfb3e8961f163323
+           149 [2026-11-07 18:50:36] COMMIT           gen 140 legacy-2a16a42511853fe974563114
+           150 [2026-11-07 18:50:36] COMMIT           gen 141 legacy-3f09806fb1000a7385224264
+           151 [2026-11-07 18:50:36] COMMIT           gen 142 legacy-2a16a42511853fe974563114
+           152 [2026-11-07 18:50:36] COMMIT           gen 143 legacy-d220f55d67ab49420be76cdc
+           153 [2026-11-07 18:50:36] COMMIT           gen 144 legacy-2a16a42511853fe974563114
+           154 [2026-11-07 18:50:37] COMMIT           gen 145 legacy-5038d6ff0587710d8b7ebb34
+           155 [2026-11-07 18:50:37] COMMIT           gen 146 legacy-2a16a42511853fe974563114
+           156 [2026-11-07 18:50:37] COMMIT           gen 147 legacy-2c7dfc48c8bdbb34e8b21a6a
+           157 [2026-11-07 18:50:37] COMMIT           gen 148 legacy-2a16a42511853fe974563114
+           158 [2026-11-07 18:50:37] COMMIT           gen 149 legacy-99faac158c7586712182ac9e
+           159 [2026-11-07 18:50:37] COMMIT           gen 150 legacy-2a16a42511853fe974563114
+           160 [2026-11-07 18:50:37] COMMIT           gen 151 legacy-cd3ff0a62143d1554201f2e9
+           161 [2026-11-07 18:50:37] COMMIT           gen 152 legacy-2a16a42511853fe974563114
+           162 [2026-11-07 18:50:37] COMMIT           gen 153 legacy-7447beedc35248195a6a187e
+           163 [2026-11-07 18:50:37] COMMIT           gen 154 legacy-2a16a42511853fe974563114
+           164 [2026-11-07 18:50:37] COMMIT           gen 155 legacy-4f1c36c072c47cce1655fbcb
+           165 [2026-11-07 18:50:37] COMMIT           gen 156 legacy-2a16a42511853fe974563114
+           166 [2026-11-07 18:50:37] COMMIT           gen 157 legacy-7dd6edb23190488a1b0b3ba7
+           167 [2026-11-07 18:50:37] COMMIT           gen 158 legacy-2a16a42511853fe974563114
+           168 [2026-11-07 18:50:37] COMMIT           gen 159 legacy-a9b110682bab0d140dfde9dd
+           169 [2026-11-07 18:50:37] COMMIT           gen 160 legacy-2a16a42511853fe974563114
+           170 [2026-11-07 18:50:37] COMMIT           gen 161 legacy-f8277372b04c7c3fee45a748
+           171 [2026-11-07 18:50:37] COMMIT           gen 162 legacy-2a16a42511853fe974563114
+           172 [2026-11-07 18:50:37] COMMIT           gen 163 legacy-d37938d83fed9eb33135b458
+           173 [2026-11-07 18:50:37] COMMIT           gen 164 legacy-2a16a42511853fe974563114
+           174 [2026-11-07 18:50:37] COMMIT           gen 165 legacy-5b57878f01efceb3f6cc3d03
+           175 [2026-11-07 18:50:37] COMMIT           gen 166 legacy-2a16a42511853fe974563114
+           176 [2026-11-07 18:50:37] COMMIT           gen 167 legacy-5127492850f4248a52b7a030
+           177 [2026-11-07 18:50:37] COMMIT           gen 168 legacy-2a16a42511853fe974563114
+           178 [2026-11-07 18:50:37] COMMIT           gen 169 legacy-a3d9353787fb9e76aacb09cc
+           179 [2026-11-07 18:50:37] COMMIT           gen 170 legacy-2a16a42511853fe974563114
+           180 [2026-11-07 18:50:37] COMMIT           gen 171 legacy-e6219b204e66cf3455038313
+           181 [2026-11-07 18:50:37] COMMIT           gen 172 legacy-2a16a42511853fe974563114
+           182 [2026-11-07 18:50:37] COMMIT           gen 173 legacy-cc3624ae1c40ae3e5a277ea2
+           183 [2026-11-07 18:50:37] COMMIT           gen 174 legacy-2a16a42511853fe974563114
+           184 [2026-11-07 18:50:37] COMMIT           gen 175 legacy-f847d6e1cb65460b344c9ba2
+           185 [2026-11-07 18:50:37] COMMIT           gen 176 legacy-2a16a42511853fe974563114
+           186 [2026-11-07 18:50:37] COMMIT           gen 177 legacy-049549cb682e1c98c0614253
+           187 [2026-11-07 18:50:37] COMMIT           gen 178 legacy-2a16a42511853fe974563114
+           188 [2026-11-07 18:50:37] COMMIT           gen 179 legacy-67906d8eb461e62aebf74504
+           189 [2026-11-07 18:50:37] COMMIT           gen 180 legacy-2a16a42511853fe974563114
+           190 [2026-11-07 18:50:37] COMMIT           gen 181 legacy-9687d11da2739aa953618b79
+           191 [2026-11-07 18:50:37] COMMIT           gen 182 legacy-2a16a42511853fe974563114
+           192 [2026-11-07 18:50:37] COMMIT           gen 183 legacy-a313d5e5ef74e95bc6ef36ac
+           193 [2026-11-07 18:50:37] COMMIT           gen 184 legacy-2a16a42511853fe974563114
+           194 [2026-11-07 18:50:38] COMMIT           gen 185 legacy-9082a41a7b3e9b1908289cf5
+           195 [2026-11-07 18:50:38] COMMIT           gen 186 legacy-2a16a42511853fe974563114
+           196 [2026-11-07 18:50:38] COMMIT           gen 187 legacy-89b19cfab2f5c8cb72863b8d
+           197 [2026-11-07 18:50:38] COMMIT           gen 188 legacy-2a16a42511853fe974563114
+           198 [2026-11-07 18:50:38] COMMIT           gen 189 legacy-6147fc84dd810bcf64a26c67
+           199 [2026-11-07 18:50:38] COMMIT           gen 190 legacy-2a16a42511853fe974563114
+           200 [2026-11-07 18:50:38] COMMIT           gen 191 legacy-c06b0bc28d7154c81c3d5b70
+           201 [2026-11-07 18:50:38] COMMIT           gen 192 legacy-2a16a42511853fe974563114
+           202 [2026-11-07 18:50:38] COMMIT           gen 193 legacy-d7c159faa69ba309e0c5bbbf
+           203 [2026-11-07 18:50:38] COMMIT           gen 194 legacy-2a16a42511853fe974563114
+           204 [2026-11-07 18:50:38] COMMIT           gen 195 legacy-48d9641d4d5e753b2c7e3312
+           205 [2026-11-07 18:50:38] COMMIT           gen 196 legacy-2a16a42511853fe974563114
+           206 [2026-11-07 18:50:38] COMMIT           gen 197 legacy-91ba1f2a99aca185dbcf100f
+           207 [2026-11-07 18:50:38] COMMIT           gen 198 legacy-2a16a42511853fe974563114
+           208 [2026-11-07 18:50:38] COMMIT           gen 199 legacy-91c2002a7767eb2fcd5dfabc
+           209 [2026-11-07 18:50:38] COMMIT           gen 200 legacy-2a16a42511853fe974563114
+           210 [2026-11-07 18:50:38] COMMIT           gen 201 legacy-ba7dbaaa4126d9b47f692c3b
+           211 [2026-11-07 18:50:38] COMMIT           gen 202 legacy-2a16a42511853fe974563114
+           212 [2026-11-07 18:50:38] COMMIT           gen 203 legacy-f2917daa463076e62a6259f5
+           213 [2026-11-07 18:50:38] COMMIT           gen 204 legacy-2a16a42511853fe974563114
+           214 [2026-11-07 18:50:38] COMMIT           gen 205 legacy-ca4f8f55ab3b93fafff2eaca
+           215 [2026-11-07 18:50:38] COMMIT           gen 206 legacy-2a16a42511853fe974563114
+           216 [2026-11-07 18:50:38] COMMIT           gen 207 legacy-de2853b5d83f30120ad5ecae
+           217 [2026-11-07 18:50:38] COMMIT           gen 208 legacy-2a16a42511853fe974563114
+           218 [2026-11-07 18:50:38] COMMIT           gen 209 legacy-2713b1fea206a70570ac19ad
+           219 [2026-11-07 18:50:38] COMMIT           gen 210 legacy-2a16a42511853fe974563114
+           220 [2026-11-07 18:50:38] COMMIT           gen 211 legacy-418c0463ff51bf62d9fd51b1
+           221 [2026-11-07 18:50:38] COMMIT           gen 212 legacy-2a16a42511853fe974563114
+           222 [2026-11-07 18:50:38] COMMIT           gen 213 legacy-c82df97e11764c0da0771cde
+           223 [2026-11-07 18:50:38] COMMIT           gen 214 legacy-2a16a42511853fe974563114
+           224 [2026-11-07 18:50:38] COMMIT           gen 215 legacy-183dfb9a920b759468b48b8f
+           225 [2026-11-07 18:50:38] COMMIT           gen 216 legacy-2a16a42511853fe974563114
+           226 [2026-11-07 18:50:38] COMMIT           gen 217 legacy-c8b4cbdd5a6f5926642d8e27
+           227 [2026-11-07 18:50:38] COMMIT           gen 218 legacy-2a16a42511853fe974563114
+           228 [2026-11-07 18:50:38] COMMIT           gen 219 legacy-06fea36f47026a469033d107
+           229 [2026-11-07 18:50:38] COMMIT           gen 220 legacy-2a16a42511853fe974563114
+           230 [2026-11-07 18:50:39] COMMIT           gen 221 legacy-edbbb41882b1a8673ebea9df
+           231 [2026-11-07 18:50:39] COMMIT           gen 222 legacy-2a16a42511853fe974563114
+           232 [2026-11-07 18:50:39] COMMIT           gen 223 legacy-fab9e1e905d4f2caab830d29
+           233 [2026-11-07 18:50:39] COMMIT           gen 224 legacy-2a16a42511853fe974563114
+           234 [2026-11-07 18:50:39] COMMIT           gen 225 legacy-8d233ad4b10d9b9f06ef3015
+           235 [2026-11-07 18:50:39] COMMIT           gen 226 legacy-2a16a42511853fe974563114
+           236 [2026-11-07 18:50:39] COMMIT           gen 227 legacy-c90f5652f9b2c376f9de65e7
+           237 [2026-11-07 18:50:39] COMMIT           gen 228 legacy-2a16a42511853fe974563114
+           238 [2026-11-07 18:50:39] COMMIT           gen 229 legacy-4962c0341a9127e5bb681470
+           239 [2026-11-07 18:50:39] COMMIT           gen 230 legacy-2a16a42511853fe974563114
+           240 [2026-11-07 18:50:39] COMMIT           gen 231 legacy-8990456f2b13d3ff3f10960e
+           241 [2026-11-07 18:50:39] COMMIT           gen 232 legacy-2a16a42511853fe974563114
+           242 [2026-11-07 18:50:39] COMMIT           gen 233 legacy-19ab0706953003a314f052c3
+           243 [2026-11-07 18:50:39] COMMIT           gen 234 legacy-2a16a42511853fe974563114
+           244 [2026-11-07 18:50:39] COMMIT           gen 235 legacy-780e900a6a6abb12337cae1d
+           245 [2026-11-07 18:50:39] COMMIT           gen 236 legacy-2a16a42511853fe974563114
+           246 [2026-11-07 18:50:39] COMMIT           gen 237 legacy-efffe723c8442c3b7f6c243c
+           247 [2026-11-07 18:50:39] COMMIT           gen 238 legacy-2a16a42511853fe974563114
+           248 [2026-11-07 18:50:39] COMMIT           gen 239 legacy-fc3bb334ebcf5e2d33373654
+           249 [2026-11-07 18:50:39] COMMIT           gen 240 legacy-2a16a42511853fe974563114
+           250 [2026-11-07 18:50:39] COMMIT           gen 241 legacy-c3fec4ecefa4498877dc7df4
+           251 [2026-11-07 18:50:39] COMMIT           gen 242 legacy-2a16a42511853fe974563114
+           252 [2026-11-07 18:50:39] COMMIT           gen 243 legacy-93f601a454203dda23d25d99
+           253 [2026-11-07 18:50:39] COMMIT           gen 244 legacy-2a16a42511853fe974563114
+           254 [2026-11-07 18:50:39] COMMIT           gen 245 legacy-09f3fa289ee53a5dd6737568
+           255 [2026-11-07 18:50:39] COMMIT           gen 246 legacy-2a16a42511853fe974563114
+           256 [2026-11-07 18:50:39] COMMIT           gen 247 legacy-9d222906ae74dd920e8619ae
+           257 [2026-11-07 18:50:39] COMMIT           gen 248 legacy-2a16a42511853fe974563114
+           258 [2026-11-07 18:50:39] COMMIT           gen 249 legacy-2736cf5a163a1429dec7d8f3
+           259 [2026-11-07 18:50:39] COMMIT           gen 250 legacy-2a16a42511853fe974563114
+           260 [2026-11-07 18:50:39] COMMIT           gen 251 legacy-d074da32ca7d39f79ffa387c
+           261 [2026-11-07 18:50:39] COMMIT           gen 252 legacy-2a16a42511853fe974563114
+           262 [2026-11-07 18:50:39] COMMIT           gen 253 legacy-9994074b14a3ba05fee80200
+           263 [2026-11-07 18:50:39] COMMIT           gen 254 legacy-2a16a42511853fe974563114
+           264 [2026-11-07 18:50:39] COMMIT           gen 255 legacy-af1b75d5554ab01658d266f4
+           265 [2026-11-07 18:50:39] COMMIT           gen 256 legacy-2a16a42511853fe974563114
+           266 [2026-11-07 18:50:39] COMMIT           gen 257 legacy-7ac490f974a3369dd39b35a0
+           267 [2026-11-07 18:50:39] COMMIT           gen 258 legacy-2a16a42511853fe974563114
+           268 [2026-11-07 18:50:39] COMMIT           gen 259 legacy-bd3cc4ed175efde4ef38e730
+           269 [2026-11-07 18:50:39] COMMIT           gen 260 legacy-2a16a42511853fe974563114
+           270 [2026-11-07 18:50:39] COMMIT           gen 261 legacy-fa24f1fd73774e8eaa80f80e
+           271 [2026-11-07 18:50:39] COMMIT           gen 262 legacy-2a16a42511853fe974563114
+           272 [2026-11-07 18:50:39] COMMIT           gen 263 legacy-b91f036fabe4a5ed49bd8fa4
+           273 [2026-11-07 18:50:39] COMMIT           gen 264 legacy-2a16a42511853fe974563114
+           274 [2026-11-07 18:50:40] COMMIT           gen 265 legacy-80245170ec929eae1c543646
+           275 [2026-11-07 18:50:40] COMMIT           gen 266 legacy-2a16a42511853fe974563114
+           276 [2026-11-07 18:50:40] COMMIT           gen 267 legacy-81093eae48f72ffeef79c1fe
+           277 [2026-11-07 18:50:40] COMMIT           gen 268 legacy-2a16a42511853fe974563114
+           278 [2026-11-07 18:50:40] COMMIT           gen 269 legacy-ddddeab4475d06766e08aabe
+           279 [2026-11-07 18:50:40] COMMIT           gen 270 legacy-2a16a42511853fe974563114
+           280 [2026-11-07 18:50:40] COMMIT           gen 271 legacy-5100b805dd7ab188ba2b3928
+           281 [2026-11-07 18:50:40] COMMIT           gen 272 legacy-2a16a42511853fe974563114
+           282 [2026-11-07 18:50:40] COMMIT           gen 273 legacy-8890c3f0e03999355455e18d
+           283 [2026-11-07 18:50:40] COMMIT           gen 274 legacy-2a16a42511853fe974563114
+           284 [2026-11-07 18:50:40] COMMIT           gen 275 legacy-d201e6e4ffffed8e40483280
+           285 [2026-11-07 18:50:40] COMMIT           gen 276 legacy-2a16a42511853fe974563114
+           286 [2026-11-07 18:50:40] COMMIT           gen 277 legacy-1452b0ff05fa3de19a48badd
+           287 [2026-11-07 18:50:40] COMMIT           gen 278 legacy-2a16a42511853fe974563114
+           288 [2026-11-07 18:50:40] COMMIT           gen 279 legacy-279222d9bc3c0b0898fb2cb8
+           289 [2026-11-07 18:50:40] COMMIT           gen 280 legacy-2a16a42511853fe974563114
+           290 [2026-11-07 18:50:40] COMMIT           gen 281 legacy-2c5ef95f2cbe775811ecf48f
+           291 [2026-11-07 18:50:40] COMMIT           gen 282 legacy-2a16a42511853fe974563114
+           292 [2026-11-07 18:50:40] COMMIT           gen 283 legacy-583cc1cee28340d455a8d02e
+           293 [2026-11-07 18:50:40] COMMIT           gen 284 legacy-2a16a42511853fe974563114
+           294 [2026-11-07 18:50:41] COMMIT           gen 285 legacy-02bf5597ce6e352986a9a0f8
+           295 [2026-11-07 18:50:41] COMMIT           gen 286 legacy-2a16a42511853fe974563114
+           296 [2026-11-07 18:50:41] COMMIT           gen 287 legacy-ca9c5e4fe93e6d3a57febca7
+           297 [2026-11-07 18:50:41] COMMIT           gen 288 legacy-2a16a42511853fe974563114
+           298 [2026-11-07 18:50:41] COMMIT           gen 289 legacy-1c11de1b5948d9754f20faf3
+           299 [2026-11-07 18:50:41] COMMIT           gen 290 legacy-2a16a42511853fe974563114
+           300 [2026-11-07 18:50:41] COMMIT           gen 291 legacy-d16ddcac8b6af0e26163c8a0
+           301 [2026-11-07 18:50:41] COMMIT           gen 292 legacy-2a16a42511853fe974563114
+           302 [2026-11-07 18:50:41] COMMIT           gen 293 legacy-c7a0a84293199f0f11819d0c
+           303 [2026-11-07 18:50:41] COMMIT           gen 294 legacy-2a16a42511853fe974563114
+           304 [2026-11-07 18:50:41] COMMIT           gen 295 legacy-52340c0b29d01103afc1f3f9
+           305 [2026-11-07 18:50:41] COMMIT           gen 296 legacy-2a16a42511853fe974563114
+           306 [2026-11-07 18:50:41] COMMIT           gen 297 legacy-de2516ae6afb6bdb3d932bc7
+           307 [2026-11-07 18:50:41] COMMIT           gen 298 legacy-2a16a42511853fe974563114
+           308 [2026-11-07 18:50:41] COMMIT           gen 299 legacy-24be99306b0160f60129678f
+           309 [2026-11-07 18:50:41] COMMIT           gen 300 legacy-2a16a42511853fe974563114
+           310 [2026-11-07 18:50:41] COMMIT           gen 301 legacy-f1218cfc0af7f2d5dc67a73e
+           311 [2026-11-07 18:50:41] COMMIT           gen 302 legacy-2a16a42511853fe974563114
+           312 [2026-11-07 18:50:41] COMMIT           gen 303 legacy-3512a02ce85091e66634f7f0
+           313 [2026-11-07 18:50:41] COMMIT           gen 304 legacy-2a16a42511853fe974563114
+           314 [2026-11-07 18:50:41] COMMIT           gen 305 legacy-af2140ab45e653b31010f355
+           315 [2026-11-07 18:50:41] COMMIT           gen 306 legacy-2a16a42511853fe974563114
+           316 [2026-11-07 18:50:41] COMMIT           gen 307 legacy-b7b56a21f3d9c222b222ce9b
+           317 [2026-11-07 18:50:41] COMMIT           gen 308 legacy-2a16a42511853fe974563114
+           318 [2026-11-07 18:50:41] COMMIT           gen 309 legacy-6cea67516b529079eafeae80
+           319 [2026-11-07 18:50:41] COMMIT           gen 310 legacy-2a16a42511853fe974563114
+           320 [2026-11-07 18:50:42] COMMIT           gen 311 legacy-6a0eb481b642ed47bf3a9ccf
+           321 [2026-11-07 18:50:42] COMMIT           gen 312 legacy-2a16a42511853fe974563114
+           322 [2026-11-07 18:50:42] COMMIT           gen 313 legacy-4eb8b89efcc0dcac61d295fb
+           323 [2026-11-07 18:50:42] COMMIT           gen 314 legacy-2a16a42511853fe974563114
+           324 [2026-11-07 18:50:42] COMMIT           gen 315 legacy-43eff0a17c1d030d088c5b63
+           325 [2026-11-07 18:50:42] COMMIT           gen 316 legacy-2a16a42511853fe974563114
+           326 [2026-11-07 18:50:42] COMMIT           gen 317 legacy-dca5a479b8bc2dc3766eeaa0
+           327 [2026-11-07 18:50:42] COMMIT           gen 318 legacy-e6d966230f1db9f7112e6956
+           328 [2026-11-07 18:50:44] COMMIT           gen 319 legacy-910778fa278bc9799f62768e
+           329 [2026-11-07 18:50:45] COMMIT           gen 320 legacy-9df983448f7a5525270d67e9
+           330 [2026-11-07 18:50:45] COMMIT           gen 321 legacy-686200b31489be36732ceaba
+           331 [2026-11-07 18:50:45] COMMIT           gen 322 legacy-eee8ac637205950f59acf72d
+           332 [2026-11-07 18:50:45] COMMIT           gen 323 legacy-686200b31489be36732ceaba
+           333 [2026-11-07 18:50:45] COMMIT           gen 324 legacy-493d1d4b1b85b7360c73db10
+           334 [2026-11-07 18:50:45] COMMIT           gen 325 legacy-686200b31489be36732ceaba
+           335 [2026-11-07 18:50:45] COMMIT           gen 326 legacy-6f1ef652b3ef68f703b3601d
+           336 [2026-11-07 18:50:45] COMMIT           gen 327 legacy-686200b31489be36732ceaba
+           337 [2026-11-07 18:50:45] COMMIT           gen 328 legacy-ccfb2f08f72b0756399967a6
+           338 [2026-11-07 18:50:45] COMMIT           gen 329 legacy-686200b31489be36732ceaba
+           339 [2026-11-07 18:50:45] COMMIT           gen 330 legacy-3b1aeeafc6410c1798918770
+           340 [2026-11-07 18:50:45] COMMIT           gen 331 legacy-686200b31489be36732ceaba
+           341 [2026-11-07 18:50:45] COMMIT           gen 332 legacy-689613529d279273dc7c71b4
+           342 [2026-11-07 18:50:45] COMMIT           gen 333 legacy-686200b31489be36732ceaba
+           343 [2026-11-07 18:50:45] COMMIT           gen 334 legacy-da237c5470a07cdb0b22e6bc
+           344 [2026-11-07 18:50:45] COMMIT           gen 335 legacy-686200b31489be36732ceaba
+           345 [2026-11-07 18:50:45] COMMIT           gen 336 legacy-710c974f300e8a50cf478462
+           346 [2026-11-07 18:50:45] COMMIT           gen 337 legacy-686200b31489be36732ceaba
+           347 [2026-11-07 18:50:45] COMMIT           gen 338 legacy-d654364d9f1c1b1abbc3d6a7
+           348 [2026-11-07 18:50:45] COMMIT           gen 339 legacy-686200b31489be36732ceaba
+           349 [2026-11-07 18:50:45] COMMIT           gen 340 legacy-1b7e0207be5db82c5d615e70
+           350 [2026-11-07 18:50:45] COMMIT           gen 341 legacy-686200b31489be36732ceaba
+           351 [2026-11-07 18:50:45] COMMIT           gen 342 legacy-aef164b7c1e7d1ebc979afd4
+           352 [2026-11-07 18:50:45] COMMIT           gen 343 legacy-686200b31489be36732ceaba
+           353 [2026-11-07 18:50:45] COMMIT           gen 344 legacy-92307d26c125c406dfc4c6b5
+           354 [2026-11-07 18:50:45] COMMIT           gen 345 legacy-686200b31489be36732ceaba
+           355 [2026-11-07 18:50:45] COMMIT           gen 346 legacy-65301ff2975a53ab74a6aff5
+           356 [2026-11-07 18:50:45] COMMIT           gen 347 legacy-686200b31489be36732ceaba
+           357 [2026-11-07 18:50:45] COMMIT           gen 348 legacy-22e04dcc97678047fd4ac4ec
+           358 [2026-11-07 18:50:45] COMMIT           gen 349 legacy-686200b31489be36732ceaba
+           359 [2026-11-07 18:50:45] COMMIT           gen 350 legacy-380d96f3809dcb7174b9a272
+           360 [2026-11-07 18:50:45] COMMIT           gen 351 legacy-686200b31489be36732ceaba
+           361 [2026-11-07 18:50:45] COMMIT           gen 352 legacy-5aebd4a63708d39e96275eb6
+           362 [2026-11-07 18:50:45] COMMIT           gen 353 legacy-686200b31489be36732ceaba
+           363 [2026-11-07 18:50:45] COMMIT           gen 354 legacy-5453fff74cc885cb777d7ebb
+           364 [2026-11-07 18:50:45] COMMIT           gen 355 legacy-686200b31489be36732ceaba
+           365 [2026-11-07 18:50:45] COMMIT           gen 356 legacy-962fe2509fdadb61b537087f
+           366 [2026-11-07 18:50:45] COMMIT           gen 357 legacy-686200b31489be36732ceaba
+           367 [2026-11-07 18:50:45] COMMIT           gen 358 legacy-f7309be47877513611ce7f01
+           368 [2026-11-07 18:50:45] COMMIT           gen 359 legacy-686200b31489be36732ceaba
+           369 [2026-11-07 18:50:46] COMMIT           gen 360 legacy-cc4ff66c3f5a0569a6c7ebed
+           370 [2026-11-07 18:50:46] COMMIT           gen 361 legacy-e1f1b90edff0894596916f59
+           371 [2026-11-07 18:50:47] COMMIT           gen 362 legacy-346d2ab0ce3b8d34376683e8
+           372 [2026-11-07 18:50:49] COMMIT           gen 363 legacy-c8c75816f5cf61d2998534ec
+           373 [2026-11-07 18:50:50] COMMIT           gen 364 legacy-c8c75816f5cf61d2998534ec
+           374 [2026-11-07 18:50:50] COMMIT-REJECTED  gen 0 generation conflict: expected 363, active is 364
+           375 [2026-11-07 18:50:50] COMMIT-REJECTED  gen 0 generation conflict: expected 363, active is 364
+           376 [2026-11-07 18:50:50] STAGE-ABORT      gen 0 validation failed
+           377 [2026-11-07 18:50:50] STAGE-ABORT      gen 0 owner closed its socket
+  [PASS] active generation unchanged
+  $ cat /tmp/w1.out /tmp/w2.out
+      committed generation 365 (gate 0.406 ms, 0 flow(s) reset)
+      error: another candidate is being staged
+  [PASS] two writers with the same expected generation: exactly one won (0/2)
+  [PASS] kernel-side validation without committing
+        candidate valid (not committed)
+
+======== 13c. v2: fail closed instead of passing untracked or untranslated packets ========
+  [PASS] flow table full: a new flow is dropped (was: accepted statelessly)
+        FAIL connect timeout
+  [PASS] counted as flow_table_full
+  [PASS] flow allocation failure: dropped
+        FAIL timeout (sent 32, received 0 of 32)
+  [PASS] counted as no_memory
+  [PASS] ...and the next flow works
+        OK 32 bytes echoed intact, local 10.0.1.2:60146
+  [PASS] SNAT pool of ONE port
+        NAT rule added: generation 366, 1 flow(s) reset
+  [PASS] first udp flow gets the only port
+        OK 32 bytes echoed intact, local 10.0.1.2:33338
+  [PASS] server saw 10.0.2.1:20000
+        10.0.2.1:20000
+  [PASS] second flow while the port is taken: dropped (was: sent untranslated)
+        FAIL timeout (sent 32, received 0 of 32)
+  [PASS] counted as nat_allocation_failed
+  [PASS] server never saw the inside address
+        10.0.2.1:20000
+  [PASS] nat flush
+        NAT rules flushed: generation 367, 1 flow(s) reset
+  [PASS] fragmented IPv4 (ping -s 3000) is refused
+        PING 10.0.2.2 (10.0.2.2): 3000 data bytes
+        
+        --- 10.0.2.2 ping statistics ---
+        1 packets transmitted, 0 packets received, 100% packet loss
+  [PASS] counted as unsupported_fragment
+
+======== 13d. v2: zones, anti-spoofing, IPv6 on managed interfaces ========
+  [PASS] zone lan = r1, sources 10.0.1.0/24
+        zone added: generation 368, 0 flow(s) reset
+  [PASS] zone wan = r2, sources 10.0.2.0/24
+        zone added: generation 369, 0 flow(s) reset
+  [PASS] packet from lan with a source outside the zone is dropped
+        PING 10.0.2.2 (10.0.2.2) from 10.9.9.9: 56 data bytes
+        
+        --- 10.0.2.2 ping statistics ---
+        1 packets transmitted, 0 packets received, 100% packet loss
+  [PASS] counted as spoofed_source
+  [PASS] a legitimate lan source still works
+        
+  [PASS] default drop + one zone-scoped rule
+        default policy set: generation 370, 1 flow(s) reset
+        rule added: generation 371, 0 flow(s) reset
+  [PASS] lan -> server tcp/80 allowed by the zone rule
+        OK 32 bytes echoed intact, local 10.0.1.2:60152
+  [PASS] wan -> lan tcp/2222 not allowed
+        FAIL connect timeout
+  [PASS] a wan-scoped copy of the rule does not open lan traffic
+        rule added: generation 372, 1 flow(s) reset
+  [PASS] lan -> server tcp/8080 still dropped (rule is for zone wan)
+        FAIL connect timeout
+  [PASS] IPv6 on a managed interface is dropped and counted
+  [PASS] back to the legacy test state
+        rules flushed: generation 373, 0 flow(s) reset
+        default policy set: generation 374, 0 flow(s) reset
+        zone deleted: generation 375, 0 flow(s) reset
+        zone deleted: generation 376, 0 flow(s) reset
+  $ /fw/uapp counters
+      generation 376, flows 0 / 16384
+      final verdicts      3653 accepted (76403968 bytes), 67 dropped (691396 bytes)
+      new flow decisions  74 accept, 13 drop; 3583 stateful hits
+      failures            3 flow creations, 1 SNAT allocations
+      drop reasons
+        rule                     2
+        default_policy           11
+        spoofed_source           1
+        flow_table_full          2
+        no_memory                1
+        nat_allocation_failed    1
+        unsupported_fragment     3
+        update_gate              39
+        generation_mismatch      3
+        ipv6                     4
+      events              0 suppressed by rate limit, 0 overwritten
+      control             375 commits, 2 rejected, 3 staging aborted
+
 ======== 14. status ========
   $ /fw/uapp status
-      myfw module         loaded (protocol v2)
+      myfw module         loaded (UAPI v3)
+      generation          376
+      policy              hash legacy-7f1f9f8992a239c21e1b877a, label "uapp zone deleted"
       default action      ACCEPT
+      zones               0
       filter rules        0
       NAT rules           0
-      connections         2 / 16384
-      log entries         0 / 1000
+      connections         0 / 16384
       timeouts            tcp 300s, udp 5s, icmp 5s
-      packets             29 new accepted, 9 dropped, 3120 stateful, 2908 NATed
+      packets             3653 accepted, 67 dropped, 3583 stateful hits, 1431 NAT rewrites
+      commits             375 (last gate 0.338 ms, 0 flows reset)
+      events              next seq 398
 
 ======== 15. unload / reload ========
   [PASS] rmmod myfw
@@ -325,37 +814,40 @@ E2E_BEGIN
   [PASS] uapp explains the module is gone
         error: the myfw kernel module is not loaded (sudo insmod kernel_mod/myfw.ko)
   [PASS] traffic still flows without the module
-        OK 32 bytes echoed intact, local 10.0.1.2:45222
+        OK 32 bytes echoed intact, local 10.0.1.2:34858
   [PASS] insmod again
         
   [PASS] starts clean
-        myfw module         loaded (protocol v2)
+        myfw module         loaded (UAPI v3)
+        generation          1
+        policy              hash initial, label "module load"
         default action      ACCEPT
+        zones               0
         filter rules        0
         NAT rules           0
         connections         0 / 16384
-        log entries         0 / 1000
         timeouts            tcp 300s, udp 60s, icmp 30s
-        packets             0 new accepted, 0 dropped, 0 stateful, 0 NATed
+        packets             0 accepted, 0 dropped, 0 stateful hits, 0 NAT rewrites
+        commits             0 (last gate 0.000 ms, 0 flows reset)
+        events              next seq 1
   [PASS] rmmod again
         
 
 ======== 16. kernel log health ========
   $ sh -c dmesg | grep myfw
-      [    6.631710] myfw: loading out-of-tree module taints kernel.
-      [    6.631950] myfw: module verification failed: signature and/or required key missing - tainting kernel
-      [    6.638800] myfw: loaded (default ACCEPT, tcp 300s / udp 5s / icmp 5s)
-      [   41.110607] myfw: unloaded
-      [   41.336777] myfw: loaded (default ACCEPT, tcp 300s / udp 60s / icmp 30s)
-      [   41.401827] myfw: unloaded
+      [    6.117631] myfw: loading out-of-tree module taints kernel.
+      [    6.118066] myfw: module verification failed: signature and/or required key missing - tainting kernel
+      [    6.127484] myfw: loaded, UAPI 3, generation 1, default ACCEPT, max_conns 16384
+      [   65.259301] myfw: unloaded
+      [   65.537611] myfw: loaded, UAPI 3, generation 1, default ACCEPT, max_conns 16384
+      [   65.614334] myfw: unloaded
   [PASS] no BUG / WARNING / Oops / lockdep splat in dmesg
-        [    6.631710] myfw: loading out-of-tree module taints kernel.
-        [    6.631950] myfw: module verification failed: signature and/or required key missing - tainting kernel
-        [    6.638800] myfw: loaded (default ACCEPT, tcp 300s / udp 5s / icmp 5s)
-        [   41.110607] myfw: unloaded
-        [   41.336777] myfw: loaded (default ACCEPT, tcp 300s / udp 60s / icmp 30s)
-        [   41.401827] myfw: unloaded
+        [    6.117631] myfw: loading out-of-tree module taints kernel.
+        [    6.118066] myfw: module verification failed: signature and/or required key missing - tainting kernel
+        [    6.127484] myfw: loaded, UAPI 3, generation 1, default ACCEPT, max_conns 16384
+        [   65.259301] myfw: unloaded
+        [   65.537611] myfw: loaded, UAPI 3, generation 1, default ACCEPT, max_conns 16384
+        [   65.614334] myfw: unloaded
 
-RESULT: 88 passed, 0 failed
+RESULT: 134 passed, 0 failed
 E2E_EXIT=0
-[   41.534561] reboot: Power down

@@ -331,9 +331,12 @@ B=$(reason flow_table_full)
 expect_fail "flow table full: a new flow is dropped (was: accepted statelessly)" tcp 10.0.2.2 80
 [ "$(reason flow_table_full)" -gt "$B" ] && pass "counted as flow_table_full" || fail "no flow_table_full count"
 echo 16384 > /sys/module/myfw/parameters/max_conns
-echo 1 > /sys/module/myfw/parameters/debug_fail_flow_alloc
+# every flow allocation fails while the knob is set (a one-shot knob could be
+# consumed by an unrelated late packet, e.g. a retransmission from the test above)
 B=$(reason no_memory)
+echo 1000000 > /sys/module/myfw/parameters/debug_fail_flow_alloc
 expect_fail "flow allocation failure: dropped" udp 10.0.2.2 9000
+echo 0 > /sys/module/myfw/parameters/debug_fail_flow_alloc
 [ "$(reason no_memory)" -gt "$B" ] && pass "counted as no_memory" || fail "no no_memory count"
 expect_ok "...and the next flow works" tcp 10.0.2.2 80
 expect_ok "SNAT pool of ONE port" \

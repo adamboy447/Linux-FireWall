@@ -1,0 +1,5 @@
+v2: {"service": "wan-host", "client": "192.0.2.1:42788", "time": 1794076265.4058013}
+v2-dataplane: {"service": "wan-host", "client": "192.0.2.1:55935", "time": 1794076410.3170552}
+baseline: {"service": "wan-host", "client": "10.10.10.10:40278", "time": 1794076559.8713653}
+nftables: {"service": "wan-host", "client": "192.0.2.1:42242", "time": 1794076703.775879}
+original: {"service": "wan-host", "client": "192.0.2.1:59342", "time": 1794076869.2517574}

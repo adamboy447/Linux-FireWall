@@ -1,0 +1,25 @@
+table ip perf {
+	chain prerouting {
+		type nat hook prerouting priority dstnat; policy accept;
+		iifname "veth-wan" ip daddr 192.0.2.1 tcp dport 8443 dnat to 10.10.20.10:443
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+		ip frag-off & 0x3fff != 0x0 drop
+		iifname "veth-lan" ip saddr != 10.10.10.0/24 drop
+		iifname "veth-dmz" ip saddr != 10.10.20.0/24 drop
+		iifname "veth-wan" ip saddr != 192.0.2.0/24 drop
+		ct state established,related accept
+		ct state invalid drop
+		iifname "veth-lan" ip saddr 10.10.10.0/24 ip daddr 10.10.20.10 tcp dport 443 accept
+		iifname "veth-lan" ip saddr 10.10.10.0/24 ip daddr 192.0.2.10 tcp dport { 443, 5201, 9000 } accept
+		iifname "veth-wan" ip saddr 192.0.2.0/24 ip daddr 10.10.20.10 tcp dport 443 ct status dnat accept
+	}
+
+	chain postrouting {
+		type nat hook postrouting priority srcnat; policy accept;
+		oifname "veth-wan" ip saddr 10.10.10.0/24 ip daddr 192.0.2.10 meta l4proto { tcp, udp } snat to 192.0.2.1:20000-59999
+		oifname "veth-wan" ip saddr 10.10.10.0/24 ip daddr 192.0.2.10 snat to 192.0.2.1
+	}
+}

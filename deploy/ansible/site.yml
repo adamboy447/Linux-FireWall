@@ -136,6 +136,7 @@
         dest: "{{ myfw_lib }}/"
         remote_src: true
         mode: "u=rwX,g=rX,o=rX"     # X: directories stay traversable for the non-root services
+      notify: restart control plane
 
     - name: Program wrappers
       ansible.builtin.template:
@@ -150,6 +151,7 @@
         dest: /etc/myfw/inventory.yaml
         remote_src: true
         mode: "0644"
+      notify: restart control plane
 
     - name: systemd units
       ansible.builtin.copy:
@@ -165,7 +167,7 @@
         - myfw-collector.service
         - myfw-verify.service
         - myfw-verify.timer
-      notify: daemon-reload
+      notify: [daemon-reload, restart control plane]
 
     - name: Runtime directory
       ansible.builtin.copy:
@@ -221,3 +223,17 @@
         daemon_reload: true
     - name: tmpfiles
       ansible.builtin.command: systemd-tmpfiles --create /etc/tmpfiles.d/myfw.conf
+    # New code or units: restart the long-running processes and the lab services
+    # (the namespaces and veths stay, so interface indexes in the policy stay valid).
+    # The kernel policy is untouched; a pending change survives because its
+    # deadline is in the state database, not in the guard's memory.
+    - name: restart control plane
+      ansible.builtin.shell: |
+        if systemctl is-active --quiet myfw-agent; then
+          systemctl restart myfw-agent myfw-guard myfw-collector
+        fi
+        for u in $(systemctl list-units --plain --no-legend 'myfw-lab-*' | awk '{print $1}'); do
+          systemctl stop "$u"
+        done
+        if systemctl is-active --quiet myfw-lab; then /usr/local/sbin/myfw-lab up >/dev/null; fi
+      changed_when: true

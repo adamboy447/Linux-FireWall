@@ -107,7 +107,8 @@ def apply(policy: str,
         fail(r, as_json)
     if as_json:
         out(r, True)
-    elif r.get("no_op"):
+        raise typer.Exit(4 if r.get("state") == "rolled_back" else 0)
+    if r.get("no_op"):
         print(f"{r['change_id']}: {r['message']} (generation {r['generation']})")
     else:
         print(f"{r['change_id']}: committed generation {r['generation']} "

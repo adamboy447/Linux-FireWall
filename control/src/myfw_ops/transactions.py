@@ -4,10 +4,12 @@ One library, used by three independent programs (agent, guard, boot), so
 whichever of them is alive can finish a transaction the same way.
 
 apply (docs/transaction-design.md):
-  1. validate + compile (semantic hash). Same hash as the active, managed
-     policy -> recorded as a no-op; nothing is committed, no flow is reset.
-  2. under the state lock: refuse if another change is pending; persist the
-     candidate snapshot and a `prepared` record (previous = last confirmed).
+  1. validate + compile (semantic hash).
+  2. under the state lock: refuse if another change is pending (even a no-op
+     must not look like success while someone else's change is unconfirmed).
+     Same hash as the active, managed policy -> recorded as a no-op; nothing
+     is committed, no flow is reset. Otherwise persist the candidate snapshot
+     and a `prepared` record (previous = last confirmed).
   3. refuse unless the rollback guard is alive (fresh heartbeat), because
      nobody else would undo an unconfirmed change.
   4. record `pending` with its deadline, THEN commit to the kernel with the
@@ -137,6 +139,10 @@ def apply(store: Store, text: str, actor_uid: int, actor: str, inv: Inventory,
     with store.lock("apply"):
         backend.check_abi()
         st = backend.status()
+        pend = store.pending()
+        if pend:
+            raise TxnError("pending", f"change {pend[0]['id']} is still pending: confirm it or roll it "
+                           "back first", {"pending": pend[0]["id"]})
         if st.get("managed") and st.get("policy_hash") == h:
             cid = store.new_id()
             store.create_change(cid, actor_uid, actor, h, h, state="noop",
@@ -144,10 +150,6 @@ def apply(store: Store, text: str, actor_uid: int, actor: str, inv: Inventory,
             store.update_change(cid, generation=st["generation"])
             return {"ok": True, "change_id": cid, "no_op": True, "generation": st["generation"],
                     "policy_hash": h, "message": "same semantic hash as the active policy: nothing committed"}
-        pend = store.pending()
-        if pend:
-            raise TxnError("pending", f"change {pend[0]['id']} is still pending: confirm it or roll it "
-                           "back first", {"pending": pend[0]["id"]})
         if require_guard and not guard_alive()[0]:
             raise TxnError("guard-down", "the rollback guard is not running; refusing an unconfirmed "
                            "change that nobody could undo")

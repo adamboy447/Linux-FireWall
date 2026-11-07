@@ -22,6 +22,7 @@ PATTERN = bytes(range(256))
 def make_handler(name: str):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        timeout = 15          # a peer that vanished (e.g. its NAT session was reset) frees the thread
 
         def log_message(self, fmt, *args):
             print(json.dumps({"service": name, "client": "%s:%d" % self.client_address,
@@ -57,13 +58,28 @@ def main(argv=None):
     ap.add_argument("--cert")
     ap.add_argument("--key")
     a = ap.parse_args(argv)
-    srv = ThreadingHTTPServer(("0.0.0.0", a.port), make_handler(a.name))
-    srv.daemon_threads = True
+    ctx = None
     if a.cert:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(a.cert, a.key)
-        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
-    srv.serve_forever()
+
+    class Server(ThreadingHTTPServer):
+        daemon_threads = True
+        request_queue_size = 128
+
+        def finish_request(self, request, client_address):
+            # TLS handshake runs in the per-connection thread, never in the accept loop,
+            # so one stalled client cannot stop the service from accepting others.
+            if ctx is not None:
+                request.settimeout(15)
+                try:
+                    request = ctx.wrap_socket(request, server_side=True)
+                except (OSError, ssl.SSLError):
+                    request.close()
+                    return
+            super().finish_request(request, client_address)
+
+    Server(("0.0.0.0", a.port), make_handler(a.name)).serve_forever()
 
 
 if __name__ == "__main__":

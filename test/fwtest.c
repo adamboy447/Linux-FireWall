@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #define TIMEOUT_MS 2000
@@ -58,10 +59,20 @@ static int do_listen(int tcp, int port, int seconds)
 			continue;
 		}
 		int c = accept(fd, (struct sockaddr *)&p, &pl);
+		struct timeval idle = { .tv_sec = 10 };
 
 		if (c < 0)
 			continue;
 		peer_line("PEER", &p);
+		/* one child per connection: a session that dies half-way (e.g. its
+		 * NAT mapping was reset by a policy commit) must not block the
+		 * server for later clients; idle connections end after 10 s */
+		if (fork() != 0) {
+			close(c);
+			continue;
+		}
+		close(fd);
+		setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &idle, sizeof(idle));
 		for (;;) {
 			ssize_t n = read(c, buf, sizeof(buf)), off = 0;
 
@@ -76,6 +87,7 @@ static int do_listen(int tcp, int port, int seconds)
 			}
 		}
 		close(c);
+		_exit(0);
 	}
 }
 
@@ -165,6 +177,7 @@ int main(int argc, char **argv)
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	signal(SIGPIPE, SIG_IGN);
+	signal(SIGCHLD, SIG_IGN);      /* reap per-connection children */
 	if (argc >= 5 && !strcmp(argv[1], "listen")) {
 		tcp = !strcmp(argv[2], "tcp");
 		return do_listen(tcp, atoi(argv[3]), atoi(argv[4]));

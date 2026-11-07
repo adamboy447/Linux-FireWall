@@ -28,7 +28,7 @@ echo ">>> kernel $KVER"
 
 # ---- build against that kernel ------------------------------------------
 make -s -C "$ROOT/kernel_mod" KDIR="$KDIR" >/dev/null
-gcc -O2 -static -Wall -I"$ROOT/include" -o "$OUT.uapp" "$ROOT"/cmd/{main,nl,util}.c
+gcc -O2 -static -Wall -I"$ROOT/include" -o "$OUT.uapp" "$ROOT"/cmd/{main,nl,util,policy,sha256}.c
 gcc -O2 -static -Wall -o "$OUT.fwtest" "$ROOT/test/fwtest.c"
 
 # ---- initramfs -----------------------------------------------------------
@@ -42,8 +42,11 @@ cp "$(command -v busybox)" "$R/bin/busybox"
 copy_with_libs() {   # copy a dynamic binary plus the libraries it needs
 	cp "$1" "$R$2"
 	ldd "$1" | grep -o '/[^ ]*' | while read -r lib; do
-		mkdir -p "$R$(dirname "$lib")"
+		mkdir -p "$R$(dirname "$lib")" "$R/lib/x86_64-linux-gnu"
 		cp -L "$lib" "$R$lib"
+		# also where the VM's loader looks by default: libraries that live in
+		# a non-standard place on the host (e.g. /usr/local/lib) still resolve
+		cp -L "$lib" "$R/lib/x86_64-linux-gnu/" 2>/dev/null || true
 	done
 }
 copy_with_libs "$(command -v ip)" /usr/local/sbin/ip   # busybox ip lacks netns

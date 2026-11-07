@@ -163,3 +163,69 @@ void fmt_endpoint(uint32_t ip, uint16_t port, uint8_t proto, char *buf, size_t n
 	else
 		snprintf(buf, n, "%s", s);
 }
+
+int parse_u32(const char *s, uint32_t *v)
+{
+	char *end;
+	unsigned long x;
+
+	if (!s || !*s)
+		return -1;
+	errno = 0;
+	x = strtoul(s, &end, 10);
+	if (errno || *end || x > 0xffffffffUL || *s == '-')
+		return -1;
+	*v = (uint32_t)x;
+	return 0;
+}
+
+/* ids: 1-63 characters of [A-Za-z0-9._:-] (no spaces: they must survive save/load) */
+int valid_id(const char *s)
+{
+	size_t n = strlen(s);
+
+	if (n == 0 || n >= FW_ID_LEN)
+		return 0;
+	for (; *s; s++)
+		if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+		      (*s >= '0' && *s <= '9') || *s == '.' || *s == '_' || *s == '-' || *s == ':'))
+			return 0;
+	return 1;
+}
+
+const char *reason_name(int r)
+{
+	static const char *names[] = {
+		[FW_R_NONE] = "none", [FW_R_RULE] = "rule", [FW_R_DEFAULT] = "default_policy",
+		[FW_R_SPOOF] = "spoofed_source", [FW_R_FLOW_IFACE] = "flow_interface",
+		[FW_R_FLOW_FULL] = "flow_table_full", [FW_R_NOMEM] = "no_memory",
+		[FW_R_NAT_ALLOC] = "nat_allocation_failed", [FW_R_NAT_STATE] = "nat_state_missing",
+		[FW_R_NAT_MANGLE] = "nat_rewrite_failed", [FW_R_PARSE] = "parse_error",
+		[FW_R_FRAGMENT] = "unsupported_fragment", [FW_R_UNSUPPORTED] = "unsupported_protocol",
+		[FW_R_GATE] = "update_gate", [FW_R_GENERATION] = "generation_mismatch",
+		[FW_R_IPV6] = "ipv6", [FW_R_EGRESS] = "egress_mismatch",
+	};
+
+	if (r >= 0 && r < FW_R__COUNT && names[r])
+		return names[r];
+	return "unknown";
+}
+
+const char *scope_name(int s)
+{
+	return s == FW_SCOPE_INGRESS ? "ingress" : s == FW_SCOPE_LOCAL_OUT ? "local_out" : "any";
+}
+
+void json_str(FILE *f, const char *s)
+{
+	fputc('"', f);
+	for (; *s; s++) {
+		if (*s == '"' || *s == '\\')
+			fprintf(f, "\\%c", *s);
+		else if ((unsigned char)*s < 0x20)
+			fprintf(f, "\\u%04x", *s);
+		else
+			fputc(*s, f);
+	}
+	fputc('"', f);
+}

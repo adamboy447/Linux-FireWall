@@ -1,30 +1,39 @@
 /*
- * conn.c - connection (flow) table.
+ * conn.c - flow table.
  *
  * Every flow stores two tuples: the ORIGINAL direction (first packet) and the
  * expected REPLY direction. Both are indexed in one red-black tree, so a
- * lookup finds a flow from either side; that is what makes replies pass
- * without a reverse rule. NAT is expressed by rewriting the reply tuple, the
- * same way the kernel's own conntrack does it:
+ * lookup finds a flow from either side. NAT is expressed by rewriting the
+ * reply tuple, the same way the kernel's conntrack does it:
  *
- *   SNAT  c:cp -> s:sp   becomes   orig  (c:cp -> s:sp)
- *                                  reply (s:sp -> NAT:np)
- *   DNAT  x:xp -> P:pp   becomes   orig  (x:xp -> P:pp)
- *                                  reply (in:ip -> x:xp)
+ *   SNAT  c:cp -> s:sp   orig (c:cp -> s:sp)   reply (s:sp -> NAT:np)
+ *   DNAT  x:xp -> P:pp   orig (x:xp -> P:pp)   reply (in:ip -> x:xp)
  *
- * All access goes through one spinlock taken with BHs disabled (the packet
- * path can run in softirq or, for LOCAL_OUT, in process context).
+ * v2 additions
+ *   - each flow belongs to the generation it was created under; flows of
+ *     older generations are never used (and are flushed at commit);
+ *   - each direction records the interface its packets must arrive on
+ *     (orig: the ingress of the first packet; reply: the egress the first
+ *     packet left through, or "local"); a mismatch is a drop, so a known
+ *     tuple cannot be injected from another interface;
+ *   - the NAT decision is taken by the filter when the flow is created; a
+ *     flow that needs SNAT and cannot get a port, leaves through the wrong
+ *     interface, or whose state is missing is DROPPED: a packet is never
+ *     sent untranslated when the policy says it must be translated.
+ *
+ * All access goes through one spinlock taken with BHs disabled.
  */
 #include <linux/slab.h>
 #include <linux/rbtree.h>
 #include <linux/timer.h>
 #include <linux/jiffies.h>
 #include <linux/random.h>
+#include <linux/netdevice.h>
 #include "fw.h"
 
 #define DIR_ORIG  0
 #define DIR_REPLY 1
-#define GC_INTERVAL HZ          /* expire flows once per second */
+#define GC_INTERVAL HZ
 
 struct conn_hnode {
 	struct rb_node rb;
@@ -36,11 +45,13 @@ struct conn {
 	struct conn_hnode h[2];
 	struct fw_tuple t[2];
 	unsigned long expires;
-	u64 pkts[2];
-	u8 nat_type;
-	u8 by_default;          /* accepted by the default policy, not a rule */
-	u8 dnat_checked, snat_checked;
+	u64 pkts[2], bytes[2];
+	u32 gen;
+	int in_if[2];
+	struct fw_nat_plan plan;
+	u8 nat_type;            /* translation actually in force */
 	u8 closing;             /* TCP FIN/RST seen */
+	char rule_id[FW_ID_LEN];
 };
 
 static struct rb_root conn_root = RB_ROOT;
@@ -142,7 +153,44 @@ static void __erase(struct conn *c)
 	kfree(c);
 }
 
-/* Replace the reply tuple (NAT). Fails if the new tuple is already in use. */
+/* find, and silently retire a flow left over from an older generation */
+static struct conn *__find_live(const struct fw_tuple *t, int *dir, u32 gen)
+{
+	struct conn *c = __find(t, dir);
+
+	if (c && c->gen != gen) {
+		__erase(c);
+		return NULL;
+	}
+	return c;
+}
+
+/*
+ * Lookup for the hooks that run after PRE_ROUTING translation. A DNATed
+ * original packet now looks like the inverse of the reply tuple, and an
+ * un-SNATed reply like the inverse of the original tuple; *dir is the
+ * packet's real direction.
+ */
+static struct conn *__find_pkt(const struct fw_tuple *t, u32 gen, int *dir)
+{
+	struct fw_tuple inv;
+	struct conn *c = __find_live(t, dir, gen);
+
+	if (c)
+		return c;
+	invert(t, &inv);
+	c = __find_live(&inv, dir, gen);
+	if (c && *dir == DIR_REPLY && c->nat_type == FW_NAT_DNAT) {
+		*dir = DIR_ORIG;
+		return c;
+	}
+	if (c && *dir == DIR_ORIG && c->nat_type == FW_NAT_SNAT) {
+		*dir = DIR_REPLY;
+		return c;
+	}
+	return NULL;
+}
+
 static int __rekey_reply(struct conn *c, const struct fw_tuple *nt)
 {
 	struct fw_tuple old = c->t[DIR_REPLY];
@@ -158,28 +206,39 @@ static int __rekey_reply(struct conn *c, const struct fw_tuple *nt)
 
 /* ----- packet path ----- */
 
-bool fw_conn_lookup(const struct fw_tuple *t, u8 flags)
+int fw_conn_lookup(const struct fw_tuple *t, u8 flags, u32 len, int ifidx, u32 gen)
 {
 	struct conn *c;
-	int dir;
+	int dir, ret = 0;
 
 	spin_lock_bh(&conn_lock);
-	c = __find(t, &dir);
+	c = __find_live(t, &dir, gen);
 	if (c) {
-		c->pkts[dir]++;
-		if (flags & FW_TCP_FIN_RST)
-			c->closing = 1;
-		c->expires = jiffies + timeout_of(c) * HZ;
+		if (c->in_if[dir] != ifidx) {
+			ret = -FW_R_FLOW_IFACE;
+		} else {
+			c->pkts[dir]++;
+			c->bytes[dir] += len;
+			if (flags & FW_TCP_FIN_RST)
+				c->closing = 1;
+			c->expires = jiffies + timeout_of(c) * HZ;
+			ret = 1;
+		}
 	}
 	spin_unlock_bh(&conn_lock);
-	return c != NULL;
+	return ret;
 }
 
-int fw_conn_add(const struct fw_tuple *t, bool by_default)
+int fw_conn_add(const struct fw_tuple *t, u32 len, int ifidx, u32 gen,
+		const struct fw_nat_plan *nat, const char *rule_id)
 {
-	struct conn *c;
+	struct conn *c, *old;
 	int ret = 0;
 
+	if (READ_ONCE(fw_debug_fail_flow_alloc)) {
+		WRITE_ONCE(fw_debug_fail_flow_alloc, fw_debug_fail_flow_alloc - 1);
+		return -ENOMEM;
+	}
 	c = kzalloc(sizeof(*c), GFP_ATOMIC);
 	if (!c)
 		return -ENOMEM;
@@ -189,17 +248,37 @@ int fw_conn_add(const struct fw_tuple *t, bool by_default)
 	c->h[DIR_REPLY].dir = DIR_REPLY;
 	RB_CLEAR_NODE(&c->h[DIR_ORIG].rb);
 	RB_CLEAR_NODE(&c->h[DIR_REPLY].rb);
-	c->by_default = by_default;
+	c->gen = gen;
+	c->in_if[DIR_ORIG] = ifidx;
+	c->in_if[DIR_REPLY] = FW_IF_UNSET;
 	c->pkts[DIR_ORIG] = 1;
+	c->bytes[DIR_ORIG] = len;
+	if (nat)
+		c->plan = *nat;
+	if (rule_id)
+		strscpy(c->rule_id, rule_id, sizeof(c->rule_id));
+	if (c->plan.type == FW_NAT_DNAT) {
+		c->t[DIR_REPLY].saddr = c->plan.to_addr;
+		c->t[DIR_REPLY].sport = c->plan.port_min;
+		c->nat_type = FW_NAT_DNAT;
+	}
 
 	spin_lock_bh(&conn_lock);
-	if (conn_cnt >= fw_max_conns) {
+	/* retire stale holders of either tuple first */
+	old = __find(&c->t[DIR_ORIG], NULL);
+	if (old && old->gen != gen)
+		__erase(old);
+	old = __find(&c->t[DIR_REPLY], NULL);
+	if (old && old->gen != gen)
+		__erase(old);
+
+	if (conn_cnt >= READ_ONCE(fw_max_conns)) {
 		ret = -ENOSPC;
 	} else if (__insert(c, DIR_ORIG)) {
 		ret = -EEXIST;                  /* another CPU created it first */
 	} else if (__insert(c, DIR_REPLY)) {
 		rb_erase(&c->h[DIR_ORIG].rb, &conn_root);
-		ret = -EEXIST;
+		ret = -EADDRINUSE;              /* reply tuple belongs to another flow */
 	} else {
 		c->expires = jiffies + timeout_of(c) * HZ;
 		list_add_tail(&c->list, &conn_list);
@@ -211,10 +290,21 @@ int fw_conn_add(const struct fw_tuple *t, bool by_default)
 	return ret;
 }
 
-/* PRE_ROUTING, after the filter: destination translation. */
-unsigned int fw_conn_nat_pre(struct sk_buff *skb, const struct fw_tuple *t)
+void fw_conn_local_in(const struct fw_tuple *t, u32 gen)
 {
-	struct fw_nat_rule nr;
+	struct conn *c;
+	int dir;
+
+	spin_lock_bh(&conn_lock);
+	c = __find_pkt(t, gen, &dir);
+	if (c && dir == DIR_ORIG && c->in_if[DIR_REPLY] == FW_IF_UNSET)
+		c->in_if[DIR_REPLY] = FW_IF_LOCAL;      /* we answer from LOCAL_OUT */
+	spin_unlock_bh(&conn_lock);
+}
+
+/* PRE_ROUTING, after the filter: DNAT and un-SNAT of replies. */
+unsigned int fw_conn_nat_pre(struct sk_buff *skb, const struct fw_tuple *t, u32 gen)
+{
 	struct conn *c;
 	bool mangle = false;
 	u32 addr = 0;
@@ -222,83 +312,91 @@ unsigned int fw_conn_nat_pre(struct sk_buff *skb, const struct fw_tuple *t)
 	int dir;
 
 	spin_lock_bh(&conn_lock);
-	c = __find(t, &dir);
-	if (!c)
-		goto out;
+	c = __find_live(t, &dir, gen);
+	if (!c) {
+		spin_unlock_bh(&conn_lock);
+		return fw_drop(skb, FW_R_NAT_STATE, -1);
+	}
 	if (dir == DIR_ORIG && c->nat_type == FW_NAT_DNAT) {
-		addr = c->t[DIR_REPLY].saddr;           /* forwarded-to host */
+		addr = c->t[DIR_REPLY].saddr;           /* the published host */
 		port = c->t[DIR_REPLY].sport;
 		mangle = true;
 	} else if (dir == DIR_REPLY && c->nat_type == FW_NAT_SNAT) {
 		addr = c->t[DIR_ORIG].saddr;            /* back to the inside host */
 		port = c->t[DIR_ORIG].sport;
 		mangle = true;
-	} else if (dir == DIR_ORIG && c->nat_type == FW_NAT_NONE && !c->dnat_checked) {
-		c->dnat_checked = 1;
-		if (fw_nat_match_dnat(t, &nr)) {
-			struct fw_tuple nt = c->t[DIR_REPLY];
-
-			nt.saddr = nr.to_addr;
-			nt.sport = nr.to_port_min;
-			if (__rekey_reply(c, &nt) == 0) {
-				c->nat_type = FW_NAT_DNAT;
-				addr = nr.to_addr;
-				port = nr.to_port_min;
-				mangle = true;
-			}
-		}
 	}
-out:
 	spin_unlock_bh(&conn_lock);
 
 	if (mangle) {
 		if (fw_pkt_mangle(skb, false, addr, port))
-			return NF_DROP;
-		atomic64_inc(&fw_stat_natted);
+			return fw_drop(skb, FW_R_NAT_MANGLE, -1);
+		fw_stat_add(FW_S_NAT, 1);
 	}
 	return NF_ACCEPT;
 }
 
 /* Pick a NAT source port whose reply tuple is unused. conn_lock held. */
-static bool __pick_snat_port(const struct fw_nat_rule *nr, struct fw_tuple *nt, u16 orig_port)
+static bool __pick_snat_port(const struct fw_nat_plan *p, struct fw_tuple *nt, u16 orig_port)
 {
 	u32 span, i, start;
 
 	if (nt->proto != IPPROTO_TCP && nt->proto != IPPROTO_UDP)
 		return __find(nt, NULL) == NULL;        /* ICMP: keep the echo id */
 
-	/* keep the original port when possible, like Linux does */
-	if (orig_port >= nr->to_port_min && orig_port <= nr->to_port_max) {
+	if (orig_port >= p->port_min && orig_port <= p->port_max) {
 		nt->dport = orig_port;
 		if (!__find(nt, NULL))
 			return true;
 	}
-	span = (u32)nr->to_port_max - nr->to_port_min + 1;
+	span = (u32)p->port_max - p->port_min + 1;
 	start = get_random_u32() % span;
 	for (i = 0; i < span; i++) {
-		nt->dport = nr->to_port_min + (start + i) % span;
-		if (nt->dport == 0)
-			continue;
+		nt->dport = p->port_min + (start + i) % span;
 		if (!__find(nt, NULL))
 			return true;
 	}
 	return false;
 }
 
-/* POST_ROUTING: source translation. */
-unsigned int fw_conn_nat_post(struct sk_buff *skb, const struct fw_tuple *t)
+/* POST_ROUTING: SNAT and un-DNAT of replies; learns the reply interface. */
+unsigned int fw_conn_nat_post(struct sk_buff *skb, const struct fw_tuple *t, u32 gen,
+			      const struct net_device *out)
 {
-	struct fw_nat_rule nr;
 	struct conn *c;
 	bool mangle = false;
 	u32 addr = 0;
 	u16 port = 0;
-	int dir;
+	int dir, fail = 0;
 
 	spin_lock_bh(&conn_lock);
-	c = __find(t, &dir);
-	if (!c)
-		goto out;
+	c = __find_pkt(t, gen, &dir);
+	if (!c) {
+		spin_unlock_bh(&conn_lock);
+		return fw_drop(skb, FW_R_NAT_STATE, -1);
+	}
+	if (dir == DIR_ORIG && c->in_if[DIR_REPLY] == FW_IF_UNSET)
+		c->in_if[DIR_REPLY] = (out->flags & IFF_LOOPBACK) ? FW_IF_LOCAL : out->ifindex;
+
+	if (dir == DIR_ORIG && c->plan.type == FW_NAT_SNAT && c->nat_type == FW_NAT_NONE) {
+		struct fw_tuple nt = c->t[DIR_REPLY];
+
+		nt.daddr = c->plan.to_addr;
+		if (c->plan.out_ifindex && c->plan.out_ifindex != out->ifindex) {
+			fail = FW_R_EGRESS;
+		} else if (!__pick_snat_port(&c->plan, &nt, t->sport) || __rekey_reply(c, &nt)) {
+			fail = FW_R_NAT_ALLOC;
+		} else {
+			c->nat_type = FW_NAT_SNAT;
+		}
+		if (fail) {
+			__erase(c);     /* never fall back to an untranslated flow */
+			spin_unlock_bh(&conn_lock);
+			if (fail == FW_R_NAT_ALLOC)
+				fw_stat_add(FW_S_NAT_ALLOC_FAIL, 1);
+			return fw_drop(skb, fail, -1);
+		}
+	}
 	if (dir == DIR_REPLY && c->nat_type == FW_NAT_DNAT) {
 		addr = c->t[DIR_ORIG].daddr;            /* look like the public address */
 		port = c->t[DIR_ORIG].dport;
@@ -307,44 +405,41 @@ unsigned int fw_conn_nat_post(struct sk_buff *skb, const struct fw_tuple *t)
 		addr = c->t[DIR_REPLY].daddr;
 		port = c->t[DIR_REPLY].dport;
 		mangle = true;
-	} else if (dir == DIR_ORIG && c->nat_type == FW_NAT_NONE && !c->snat_checked) {
-		c->snat_checked = 1;
-		if (fw_nat_match_snat(t, &nr)) {
-			struct fw_tuple nt = c->t[DIR_REPLY];
-
-			nt.daddr = nr.to_addr;
-			if (__pick_snat_port(&nr, &nt, t->sport) && __rekey_reply(c, &nt) == 0) {
-				c->nat_type = FW_NAT_SNAT;
-				addr = nt.daddr;
-				port = nt.dport;
-				mangle = true;
-			} else {
-				pr_warn_ratelimited(FW_TAG "SNAT: no free port in %u-%u\n",
-						    nr.to_port_min, nr.to_port_max);
-			}
-		}
 	}
-out:
 	spin_unlock_bh(&conn_lock);
 
 	if (mangle) {
 		if (fw_pkt_mangle(skb, true, addr, port))
-			return NF_DROP;
-		atomic64_inc(&fw_stat_natted);
+			return fw_drop(skb, FW_R_NAT_MANGLE, -1);
+		fw_stat_add(FW_S_NAT, 1);
 	}
 	return NF_ACCEPT;
 }
 
 /* ----- management ----- */
 
-static u32 flush_if(bool (*pred)(const struct conn *, const void *), const void *arg)
+u32 fw_conn_flush_all(void)
 {
 	struct conn *c, *tmp;
 	u32 n = 0;
 
 	spin_lock_bh(&conn_lock);
 	list_for_each_entry_safe(c, tmp, &conn_list, list) {
-		if (!pred || pred(c, arg)) {
+		__erase(c);
+		n++;
+	}
+	spin_unlock_bh(&conn_lock);
+	return n;
+}
+
+u32 fw_conn_flush_stale(u32 gen)
+{
+	struct conn *c, *tmp;
+	u32 n = 0;
+
+	spin_lock_bh(&conn_lock);
+	list_for_each_entry_safe(c, tmp, &conn_list, list) {
+		if (c->gen != gen) {
 			__erase(c);
 			n++;
 		}
@@ -352,26 +447,6 @@ static u32 flush_if(bool (*pred)(const struct conn *, const void *), const void 
 	spin_unlock_bh(&conn_lock);
 	return n;
 }
-
-static bool pred_rule(const struct conn *c, const void *arg)
-{
-	return fw_rule_matches(arg, &c->t[DIR_ORIG]);
-}
-
-static bool pred_default(const struct conn *c, const void *arg)
-{
-	return c->by_default;
-}
-
-static bool pred_nat(const struct conn *c, const void *arg)
-{
-	return c->nat_type != FW_NAT_NONE;
-}
-
-u32 fw_conn_flush_matching(const struct fw_rule *r) { return flush_if(pred_rule, r); }
-u32 fw_conn_flush_default(void) { return flush_if(pred_default, NULL); }
-u32 fw_conn_flush_nat(void) { return flush_if(pred_nat, NULL); }
-u32 fw_conn_flush_all(void) { return flush_if(NULL, NULL); }
 
 u32 fw_conn_count(void)
 {
@@ -383,18 +458,21 @@ u32 fw_conn_count(void)
 	return c;
 }
 
-u32 fw_conn_dump(struct fw_conn *buf, u32 max, u32 *total)
+u32 fw_conn_dump(struct fw_conn_info *buf, u32 start, u32 max, u32 *total)
 {
 	struct conn *c;
-	u32 i = 0;
+	u32 i = 0, n = 0;
 
 	spin_lock_bh(&conn_lock);
 	*total = conn_cnt;
 	list_for_each_entry(c, &conn_list, list) {
-		struct fw_conn *o = &buf[i];
+		struct fw_conn_info *o;
 
-		if (i >= max)
+		if (i++ < start)
+			continue;
+		if (n >= max)
 			break;
+		o = &buf[n++];
 		memset(o, 0, sizeof(*o));
 		o->saddr = c->t[DIR_ORIG].saddr;
 		o->daddr = c->t[DIR_ORIG].daddr;
@@ -406,14 +484,20 @@ u32 fw_conn_dump(struct fw_conn *buf, u32 max, u32 *total)
 		o->r_dport = c->t[DIR_REPLY].dport;
 		o->proto = c->t[DIR_ORIG].proto;
 		o->nat_type = c->nat_type;
+		o->closing = c->closing;
 		o->expires_in = time_after(c->expires, jiffies) ?
 				(c->expires - jiffies + HZ - 1) / HZ : 0;
-		o->pkts_orig = c->pkts[DIR_ORIG];
-		o->pkts_reply = c->pkts[DIR_REPLY];
-		i++;
+		o->generation = c->gen;
+		o->in_if[0] = c->in_if[0];
+		o->in_if[1] = c->in_if[1];
+		o->pkts[0] = c->pkts[0];
+		o->pkts[1] = c->pkts[1];
+		o->bytes[0] = c->bytes[0];
+		o->bytes[1] = c->bytes[1];
+		memcpy(o->rule_id, c->rule_id, sizeof(o->rule_id));
 	}
 	spin_unlock_bh(&conn_lock);
-	return i;
+	return n;
 }
 
 /* ----- garbage collection ----- */
@@ -421,10 +505,18 @@ u32 fw_conn_dump(struct fw_conn *buf, u32 max, u32 *total)
 static void gc_timer_fn(struct timer_list *unused)
 {
 	struct conn *c, *tmp;
+	struct fw_snap *s;
+	u32 gen = 0;
+
+	rcu_read_lock();
+	s = rcu_dereference(fw_active);
+	if (s)
+		gen = s->gen;
+	rcu_read_unlock();
 
 	spin_lock_bh(&conn_lock);
 	list_for_each_entry_safe(c, tmp, &conn_list, list)
-		if (time_after_eq(jiffies, c->expires))
+		if (time_after_eq(jiffies, c->expires) || c->gen != gen)
 			__erase(c);
 	spin_unlock_bh(&conn_lock);
 	mod_timer(&gc_timer, jiffies + GC_INTERVAL);

@@ -1,149 +1,329 @@
 /*
- * fw_proto.h - wire protocol shared by the myfw kernel module and the uapp CLI.
+ * fw_proto.h - user/kernel ABI (UAPI) of the myfw firewall, version 3.
  *
- * Both sides include this one file, so the structures can never drift apart.
- * Every address and port in these structures is in HOST byte order.
+ * One file is shared by the kernel module, the uapp CLI and (via the
+ * layout check in control/src/myfw_ops/abi.py) the Python control plane.
+ *
+ * Model
+ *   The kernel holds exactly one ACTIVE POLICY SNAPSHOT: zones, filter rules,
+ *   NAT rules and the default action. It is immutable. A change is made by
+ *   staging a complete candidate (STAGE_BEGIN / STAGE_CHUNK), having the
+ *   kernel validate it (STAGE_VALIDATE) and switching to it in one step
+ *   (STAGE_COMMIT with the generation the caller expects to replace).
+ *   Every commit gets a new, strictly increasing GENERATION and resets all
+ *   tracked flows.
+ *
+ * Wire format
+ *   request  = struct fw_req_hdr + payload (hdr.len bytes)
+ *   response = struct fw_rsp_hdr + body
+ *   All integers are host byte order (both ends run on the same machine);
+ *   IPv4 addresses and ports are host byte order too.
+ *   Every structure below has a fixed size with explicit padding; the sizes
+ *   are reported by FW_REQ_ABI so user space can refuse a mismatching module.
  */
 #ifndef FW_PROTO_H
 #define FW_PROTO_H
 
 #include <linux/types.h>
 
-#define NETLINK_MYFW        17      /* netlink protocol number (unused by mainline) */
-#define FW_PROTO_VERSION    2
-#define FW_NAME_LEN         16      /* rule name buffer, including the NUL */
-#define FW_MAX_RSP_BYTES    (60 * 1024)  /* responses are truncated to this size */
+#define NETLINK_MYFW            17
+#define FW_UAPI_VERSION         3
 
-/* ---------- requests (uapp -> kernel) ---------- */
+#define FW_ID_LEN               64      /* rule/NAT/zone id, including the NUL */
+#define FW_IFNAME_LEN           16      /* = IFNAMSIZ */
+#define FW_HASH_LEN             72      /* 64 hex chars + NUL, padded */
+#define FW_LABEL_LEN            64
+#define FW_MAX_ZONES            8
+#define FW_MAX_ZONE_SRCS        8
+#define FW_MAX_RULES            128
+#define FW_MAX_NATS             32
+#define FW_MAX_POLICY_BYTES     (64 * 1024)
+#define FW_MAX_CHUNK            16384
+#define FW_MAX_RSP_BYTES        (60 * 1024)     /* bigger answers are paged */
+#define FW_POLICY_MAGIC         0x4d594657u     /* "MYFW" */
+
+/* ---------------------------------------------------------------- requests */
 enum fw_req_type {
-	FW_REQ_STATUS = 1,
-	FW_REQ_GET_RULES,
-	FW_REQ_ADD_RULE,
-	FW_REQ_DEL_RULE,
-	FW_REQ_FLUSH_RULES,
-	FW_REQ_SET_DEFAULT,
-	FW_REQ_GET_LOGS,
-	FW_REQ_CLEAR_LOGS,
-	FW_REQ_GET_CONNS,
-	FW_REQ_FLUSH_CONNS,
-	FW_REQ_GET_NATS,
-	FW_REQ_ADD_NAT,
-	FW_REQ_DEL_NAT,
-	FW_REQ_FLUSH_NATS,
+	FW_REQ_ABI = 1,         /* -> FW_RSP_ABI */
+	FW_REQ_STATUS,          /* -> FW_RSP_STATUS */
+	FW_REQ_COUNTERS,        /* -> FW_RSP_COUNTERS */
+	FW_REQ_GET_POLICY,      /* fw_page_req{offset=byte} -> FW_RSP_POLICY (raw blob bytes) */
+	FW_REQ_RULE_STATS,      /* fw_page_req{offset=index} -> FW_RSP_RULE_STATS */
+	FW_REQ_GET_CONNS,       /* fw_page_req{offset=index} -> FW_RSP_CONNS */
+	FW_REQ_FLUSH_CONNS,     /* -> FW_RSP_OK, hdr.count = flows removed */
+	FW_REQ_GET_EVENTS,      /* fw_page_req{offset=since_seq} -> FW_RSP_EVENTS */
+	FW_REQ_STAGE_BEGIN,     /* fw_stage_begin */
+	FW_REQ_STAGE_CHUNK,     /* fw_stage_chunk + data */
+	FW_REQ_STAGE_VALIDATE,  /* no payload */
+	FW_REQ_STAGE_COMMIT,    /* fw_stage_commit -> FW_RSP_COMMIT */
+	FW_REQ_STAGE_ABORT,     /* no payload */
+	FW_REQ__MAX
 };
 
-/* ---------- responses (kernel -> uapp) ---------- */
+struct fw_req_hdr {
+	__u32 type;             /* enum fw_req_type */
+	__u32 version;          /* FW_UAPI_VERSION */
+	__u32 flags;            /* reserved, 0 */
+	__u32 len;              /* payload bytes following this header */
+};
+
+struct fw_page_req {
+	__u64 offset;           /* byte offset / element index / since_seq */
+	__u32 max;              /* max elements (0 = as many as fit) */
+	__u32 pad;
+};
+
+/* --------------------------------------------------------------- responses */
 enum fw_rsp_type {
-	FW_RSP_OK = 100,        /* no body, see hdr.msg */
-	FW_RSP_ERR,             /* hdr.code holds -errno, hdr.msg a reason */
-	FW_RSP_STATUS,          /* body: struct fw_status */
-	FW_RSP_RULES,           /* body: struct fw_rule[count] */
-	FW_RSP_LOGS,            /* body: struct fw_log[count] */
-	FW_RSP_CONNS,           /* body: struct fw_conn[count] */
-	FW_RSP_NATS,            /* body: struct fw_nat_rule[count] */
-};
-
-#define FW_ACT_DROP     0
-#define FW_ACT_ACCEPT   1
-
-/* FW_REQ_ADD_RULE flags (fw_request.arg) */
-#define FW_ADD_HEAD     0       /* insert at the top of the chain */
-#define FW_ADD_TAIL     1       /* append at the end of the chain */
-#define FW_ADD_AFTER    2       /* insert after the rule named in fw_request.name */
-
-/* FW_REQ_SET_DEFAULT: fw_request.arg = action | (log ? FW_DEFAULT_LOG : 0) */
-#define FW_DEFAULT_LOG  0x100
-
-struct fw_rule {
-	char  name[FW_NAME_LEN];
-	__u32 saddr, smask;
-	__u32 daddr, dmask;
-	__u16 sport_min, sport_max;     /* ports are ignored for ICMP */
-	__u16 dport_min, dport_max;
-	__u8  proto;                    /* IPPROTO_TCP/UDP/ICMP, 0 = any */
-	__u8  action;                   /* FW_ACT_* */
-	__u8  log;
-	__u8  pad;
-	__u64 hit_pkts;                 /* filled in by the kernel */
-	__u64 hit_bytes;
-};
-
-#define FW_NAT_NONE     0
-#define FW_NAT_SNAT     1
-#define FW_NAT_DNAT     2
-
-/*
- * SNAT: packets from saddr/smask going to a destination outside that subnet
- *       get their source rewritten to to_addr, with a source port picked from
- *       [to_port_min, to_port_max].
- * DNAT: packets to daddr:dport (proto TCP or UDP) get their destination
- *       rewritten to to_addr:to_port_min (port forwarding).
- */
-struct fw_nat_rule {
-	__u8  type;                     /* FW_NAT_SNAT / FW_NAT_DNAT */
-	__u8  proto;                    /* DNAT only */
-	__u16 dport;                    /* DNAT only */
-	__u32 saddr, smask;             /* SNAT only */
-	__u32 daddr;                    /* DNAT only */
-	__u32 to_addr;
-	__u16 to_port_min, to_port_max;
-	__u64 hits;                     /* filled in by the kernel */
-};
-
-struct fw_log {
-	__s64 ts;                       /* unix time (seconds) */
-	__u32 saddr, daddr;
-	__u16 sport, dport;
-	__u8  proto;
-	__u8  action;                   /* FW_ACT_* */
-	__u8  by_default;               /* 1 = decided by the default policy */
-	__u8  pad;
-	__u32 len;                      /* IP payload length */
-	char  rule[FW_NAME_LEN];        /* matching rule, empty if by default */
-};
-
-struct fw_conn {
-	/* original direction, as seen by the first packet */
-	__u32 saddr, daddr;
-	__u16 sport, dport;
-	/* expected reply direction (differs from the inverse when NAT is applied) */
-	__u32 r_saddr, r_daddr;
-	__u16 r_sport, r_dport;
-	__u8  proto;
-	__u8  nat_type;                 /* FW_NAT_* */
-	__u16 pad;
-	__u32 expires_in;               /* seconds until the entry times out */
-	__u64 pkts_orig, pkts_reply;
-};
-
-struct fw_status {
-	__u32 version;
-	__u8  default_action;
-	__u8  log_default;
-	__u16 pad;
-	__u32 n_rules, n_nats, n_conns, n_logs;
-	__u32 max_conns, max_logs;
-	__u32 tcp_timeout, udp_timeout, icmp_timeout;
-	__u32 pad2;
-	__u64 pkts_accepted, pkts_dropped, pkts_stateful, pkts_natted;
-};
-
-struct fw_request {
-	__u32 type;                     /* enum fw_req_type */
-	__u32 arg;                      /* add flags / default action / log count / NAT seq */
-	char  name[FW_NAME_LEN];        /* rule to delete, or "insert after" anchor */
-	union {
-		struct fw_rule rule;
-		struct fw_nat_rule nat;
-	} u;
+	FW_RSP_OK = 100,
+	FW_RSP_ERR,             /* code = -errno, msg = reason */
+	FW_RSP_ABI,             /* struct fw_abi */
+	FW_RSP_STATUS,          /* struct fw_status */
+	FW_RSP_COUNTERS,        /* struct fw_counters */
+	FW_RSP_POLICY,          /* count bytes of the active blob; total = blob size, a = offset */
+	FW_RSP_RULE_STATS,      /* struct fw_rule_stat[count]; total = rules, a = first index */
+	FW_RSP_CONNS,           /* struct fw_conn_info[count]; total = flows, a = first index, b = generation */
+	FW_RSP_EVENTS,          /* struct fw_event[count]; a = oldest seq kept, b = next seq, c = lost */
+	FW_RSP_COMMIT,          /* struct fw_commit_result */
 };
 
 struct fw_rsp_hdr {
-	__u32 type;                     /* enum fw_rsp_type */
-	__s32 code;                     /* 0 or -errno */
-	__u32 count;                    /* number of elements in the body */
-	__u32 total;                    /* number available (count < total => truncated) */
-	char  msg[64];
+	__u32 type;             /* enum fw_rsp_type */
+	__s32 code;             /* 0 or -errno */
+	__u32 version;          /* FW_UAPI_VERSION */
+	__u32 count;            /* elements (or bytes) in the body */
+	__u64 total;
+	__u64 a, b, c;          /* meaning depends on type, see above */
+	char  msg[96];
 };
+
+/* -------------------------------------------------------- policy blob format
+ *
+ * blob = fw_policy_hdr
+ *        fw_zone_spec[n_zones]
+ *        fw_rule_spec[n_rules]
+ *        fw_nat_spec[n_nats]
+ * and nothing else (the kernel checks the exact size and a SHA-256 of it).
+ */
+#define FW_ACT_DROP             0
+#define FW_ACT_ACCEPT           1
+
+#define FW_SCOPE_ANY            0       /* both ingress and local_out (legacy) */
+#define FW_SCOPE_INGRESS        1       /* packets arriving on an interface */
+#define FW_SCOPE_LOCAL_OUT      2       /* packets generated by this host */
+
+#define FW_POLICY_F_MANAGED     0x01    /* owned by fwctl: uapp legacy edits refuse */
+#define FW_POLICY_F_LEGACY      0x02    /* produced by uapp legacy commands */
+
+#define FW_NAT_NONE             0
+#define FW_NAT_SNAT             1
+#define FW_NAT_DNAT             2
+
+struct fw_policy_hdr {
+	__u32 magic;            /* FW_POLICY_MAGIC */
+	__u32 version;          /* FW_UAPI_VERSION */
+	__u32 n_zones, n_rules, n_nats;
+	__u8  default_action;   /* FW_ACT_* */
+	__u8  default_log;
+	__u8  flags;            /* FW_POLICY_F_* */
+	__u8  pad0;
+	char  policy_hash[FW_HASH_LEN];  /* semantic hash from the compiler */
+	char  label[FW_LABEL_LEN];       /* change id or free text */
+	__u32 reserved[4];
+};
+
+struct fw_cidr {
+	__u32 addr, mask;
+};
+
+/*
+ * A zone is "the managed interface a packet came in on". Packets arriving
+ * on the zone's interface must have a source inside one of srcs[] (anti-spoof)
+ * unless n_srcs is 0. Rules and NAT entries refer to zones by 1-based index;
+ * 0 means "any".
+ */
+struct fw_zone_spec {
+	char  name[FW_ID_LEN];
+	char  ifname[FW_IFNAME_LEN];
+	__u32 n_srcs;
+	__u32 flags;            /* reserved, 0 */
+	struct fw_cidr srcs[FW_MAX_ZONE_SRCS];
+};
+
+struct fw_rule_spec {
+	char  id[FW_ID_LEN];
+	__u32 saddr, smask;
+	__u32 daddr, dmask;
+	__u16 sport_min, sport_max;     /* ignored for ICMP */
+	__u16 dport_min, dport_max;
+	__u8  scope;            /* FW_SCOPE_* */
+	__u8  zone;             /* ingress zone, 1-based; 0 = any */
+	__u8  proto;            /* 6, 17, 1 or 0 = any */
+	__u8  action;           /* FW_ACT_* */
+	__u8  log;
+	__u8  pad[3];
+};
+
+/*
+ * SNAT: new flows from saddr/smask to daddr/dmask (dmask 0 = anywhere outside
+ *       the source subnet), arriving in zone (0 = any), leaving through
+ *       out_ifname ("" = any) get source to_addr:[to_port_min, to_port_max].
+ * DNAT: new flows to daddr (must be /32) port dport, proto TCP or UDP,
+ *       arriving in zone (0 = any) get destination to_addr:to_port_min.
+ */
+struct fw_nat_spec {
+	char  id[FW_ID_LEN];
+	char  out_ifname[FW_IFNAME_LEN];
+	__u32 saddr, smask;
+	__u32 daddr, dmask;
+	__u32 to_addr;
+	__u16 dport;
+	__u16 to_port_min, to_port_max;
+	__u16 pad16;
+	__u8  type;             /* FW_NAT_SNAT / FW_NAT_DNAT */
+	__u8  proto;            /* 0 = any (SNAT), 6 / 17 */
+	__u8  zone;             /* 1-based, 0 = any */
+	__u8  pad;
+};
+
+/* ---------------------------------------------------------------- staging */
+struct fw_stage_begin {
+	__u32 size;             /* total blob bytes */
+	__u32 pad;
+	__u8  sha256[32];       /* SHA-256 of the whole blob */
+};
+
+struct fw_stage_chunk {
+	__u32 offset;           /* must equal the bytes received so far */
+	__u32 len;              /* data bytes following this struct */
+};
+
+struct fw_stage_commit {
+	__u32 expected_generation;      /* commit only if this is still active */
+	__u32 flags;                    /* reserved, 0 */
+};
+
+struct fw_commit_result {
+	__u32 generation;       /* the new active generation */
+	__u32 pad;
+	__u64 gate_ns;          /* how long managed traffic was gated */
+	__u64 flows_reset;
+	char  policy_hash[FW_HASH_LEN];
+};
+
+/* --------------------------------------------------------- drop reasons */
+enum fw_reason {
+	FW_R_NONE = 0,
+	FW_R_RULE,              /* a filter rule said drop */
+	FW_R_DEFAULT,           /* default policy drop */
+	FW_R_SPOOF,             /* source not allowed in the ingress zone */
+	FW_R_FLOW_IFACE,        /* flow packet arrived on an unexpected interface */
+	FW_R_FLOW_FULL,         /* new flow refused: table at max_conns */
+	FW_R_NOMEM,             /* new flow refused: allocation failed */
+	FW_R_NAT_ALLOC,         /* SNAT port pool exhausted */
+	FW_R_NAT_STATE,         /* translation state missing */
+	FW_R_NAT_MANGLE,        /* header rewrite failed */
+	FW_R_PARSE,             /* truncated / malformed header */
+	FW_R_FRAGMENT,          /* IPv4 fragments are not supported */
+	FW_R_UNSUPPORTED,       /* protocol / ICMP type outside the supported set */
+	FW_R_GATE,              /* policy switch in progress */
+	FW_R_GENERATION,        /* packet decided under an older generation */
+	FW_R_IPV6,              /* IPv6 on a managed interface */
+	FW_R_EGRESS,            /* SNAT flow leaving through the wrong interface */
+	FW_R__COUNT
+};
+#define FW_R_SLOTS 24           /* array size in fw_counters (>= FW_R__COUNT) */
+
+#define FW_ZONE_SLOTS   (FW_MAX_ZONES + 2)      /* 0 = no zone, 1..8, 9 = local */
+#define FW_ZONE_LOCAL   (FW_MAX_ZONES + 1)
+
+/* ------------------------------------------------------------ status/stats */
+struct fw_status {
+	__u32 uapi_version;
+	__u32 generation;
+	__u8  default_action, default_log, flags, gate;
+	__u32 n_zones, n_rules, n_nats;
+	__u32 n_conns, max_conns;
+	__u32 tcp_timeout, udp_timeout, icmp_timeout;
+	__u32 stage_state;      /* 0 idle, 1 receiving, 2 validated */
+	__u32 stage_bytes;
+	__u32 pad;
+	__u64 commits;
+	__u64 last_gate_ns;
+	__s64 last_commit_ns;   /* CLOCK_REALTIME */
+	__u64 last_flows_reset;
+	__u64 event_next_seq;
+	char  policy_hash[FW_HASH_LEN];
+	char  label[FW_LABEL_LEN];
+	char  blob_sha256[FW_HASH_LEN];
+};
+
+struct fw_counters {
+	__u32 generation;
+	__u32 n_conns, max_conns;
+	__u32 pad;
+	__u64 accept_pkts, accept_bytes;        /* final verdicts */
+	__u64 drop_pkts, drop_bytes;
+	__u64 drop_reason[FW_R_SLOTS];
+	__u64 zone_accept[FW_ZONE_SLOTS];       /* since the active generation */
+	__u64 zone_drop[FW_ZONE_SLOTS];
+	__u64 new_flow_accept, new_flow_drop;   /* rule/default decisions */
+	__u64 stateful_hits;
+	__u64 nat_translations;
+	__u64 flow_create_failed;
+	__u64 nat_alloc_failed;
+	__u64 events_suppressed;                /* rate-limited packet events */
+	__u64 events_overwritten;               /* ring overwrites */
+	__u64 commits, commit_rejected, stage_aborted;
+};
+
+struct fw_rule_stat {
+	char  id[FW_ID_LEN];
+	__u64 flows;            /* new flows decided by this rule */
+	__u64 bytes;            /* IP payload bytes of those first packets */
+};
+
+struct fw_conn_info {
+	__u32 saddr, daddr, r_saddr, r_daddr;
+	__u16 sport, dport, r_sport, r_dport;
+	__u8  proto, nat_type, closing, pad;
+	__u32 expires_in;
+	__u32 generation;
+	__s32 in_if[2];         /* expected ingress ifindex; -1 = local, 0 = not yet known */
+	__u32 pad2;
+	__u64 pkts[2], bytes[2];
+	char  rule_id[FW_ID_LEN];
+};
+
+#define FW_EV_PACKET            1
+#define FW_EV_COMMIT            2
+#define FW_EV_STAGE_ABORT       3
+#define FW_EV_COMMIT_REJECTED   4
+
+struct fw_event {
+	__u64 seq;
+	__s64 ts_ns;            /* CLOCK_REALTIME */
+	__u32 generation;
+	__u32 kind;             /* FW_EV_* */
+	__u32 saddr, daddr;
+	__u16 sport, dport;
+	__u8  proto, verdict, reason, zone;
+	__u32 len;
+	__s32 ifindex;
+	char  rule_id[FW_ID_LEN];       /* rule, or policy hash for commit events */
+};
+
+/* sizes, in this order, are returned by FW_REQ_ABI */
+#define FW_ABI_STRUCTS 16
+struct fw_abi {
+	__u32 uapi_version;
+	__u32 n;
+	__u32 size[FW_ABI_STRUCTS];
+};
+#define FW_ABI_LIST(X) \
+	X(fw_req_hdr) X(fw_page_req) X(fw_rsp_hdr) X(fw_policy_hdr) \
+	X(fw_zone_spec) X(fw_rule_spec) X(fw_nat_spec) X(fw_stage_begin) \
+	X(fw_stage_chunk) X(fw_stage_commit) X(fw_commit_result) X(fw_status) \
+	X(fw_counters) X(fw_rule_stat) X(fw_conn_info) X(fw_event)
 
 #endif /* FW_PROTO_H */

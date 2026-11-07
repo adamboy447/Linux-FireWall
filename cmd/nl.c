@@ -1,5 +1,5 @@
 /*
- * nl.c - netlink request/response exchange with the myfw module.
+ * nl.c - netlink sessions with the myfw module.
  */
 #include <errno.h>
 #include <stdlib.h>
@@ -10,7 +10,7 @@
 #include <linux/netlink.h>
 #include "uapp.h"
 
-#define RECV_BUF (FW_MAX_RSP_BYTES + 4096)
+#define RECV_BUF (FW_MAX_RSP_BYTES + 8192)
 
 const char *fw_strerror(int err)
 {
@@ -22,54 +22,76 @@ const char *fw_strerror(int err)
 	case -ETIMEDOUT:
 	case -EAGAIN:
 		return "no answer from the kernel module";
+	case -EPROTO:
+		return "UAPI version mismatch between uapp and the loaded module";
+	case -ESTALE:
+		return "generation conflict: the policy changed meanwhile";
 	default:
 		return strerror(-err);
 	}
 }
 
-int fw_call(const struct fw_request *req, struct fw_rsp_hdr **hdr, void **body)
+int fw_open(struct fw_nl *nl)
 {
 	struct sockaddr_nl local = { .nl_family = AF_NETLINK };
-	struct sockaddr_nl kernel = { .nl_family = AF_NETLINK };
-	struct timeval tv = { .tv_sec = 3 };
-	struct {
-		struct nlmsghdr nlh;
-		struct fw_request req;
-	} msg;
-	struct nlmsghdr *rnlh;
-	char *buf;
-	ssize_t n;
-	int fd, err;
+	struct timeval tv = { .tv_sec = 10 };
+	int err;
 
-	fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_MYFW);
-	if (fd < 0)
+	nl->fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_MYFW);
+	if (nl->fd < 0)
 		return -errno;
-	/* nl_pid = 0: let the kernel assign a unique port id */
-	if (bind(fd, (struct sockaddr *)&local, sizeof(local)) < 0) {
+	/* nl_pid = 0: the kernel assigns a unique port id */
+	if (bind(nl->fd, (struct sockaddr *)&local, sizeof(local)) < 0) {
 		err = -errno;
-		close(fd);
+		close(nl->fd);
+		nl->fd = -1;
 		return err;
 	}
-	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	setsockopt(nl->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	return 0;
+}
 
-	memset(&msg, 0, sizeof(msg));
-	msg.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(msg.req));
-	msg.req = *req;
-	if (sendto(fd, &msg, msg.nlh.nlmsg_len, 0, (struct sockaddr *)&kernel, sizeof(kernel)) < 0) {
-		err = -errno;
-		close(fd);
-		return err;
-	}
+void fw_close(struct fw_nl *nl)
+{
+	if (nl->fd >= 0)
+		close(nl->fd);
+	nl->fd = -1;
+}
+
+int fw_req(struct fw_nl *nl, uint32_t type, const void *payload, size_t len,
+	   struct fw_rsp_hdr **hdr, void **body)
+{
+	struct sockaddr_nl kernel = { .nl_family = AF_NETLINK };
+	struct nlmsghdr *nlh, *rnlh;
+	struct fw_req_hdr *rh;
+	size_t mlen = NLMSG_LENGTH(sizeof(*rh) + len);
+	char *buf, *out;
+	ssize_t n;
+	int err;
+
+	if (hdr)
+		*hdr = NULL;
+	nlh = calloc(1, NLMSG_SPACE(sizeof(*rh) + len));
+	if (!nlh)
+		return -ENOMEM;
+	nlh->nlmsg_len = mlen;
+	rh = NLMSG_DATA(nlh);
+	rh->type = type;
+	rh->version = FW_UAPI_VERSION;
+	rh->len = len;
+	if (len)
+		memcpy(rh + 1, payload, len);
+	n = sendto(nl->fd, nlh, mlen, 0, (struct sockaddr *)&kernel, sizeof(kernel));
+	free(nlh);
+	if (n < 0)
+		return -errno;
 
 	buf = malloc(RECV_BUF);
-	if (!buf) {
-		close(fd);
+	if (!buf)
 		return -ENOMEM;
-	}
-	n = recv(fd, buf, RECV_BUF, 0);
-	err = n < 0 ? -errno : 0;
-	close(fd);
-	if (err) {
+	n = recv(nl->fd, buf, RECV_BUF, 0);
+	if (n < 0) {
+		err = -errno;
 		free(buf);
 		return err;
 	}
@@ -78,9 +100,20 @@ int fw_call(const struct fw_request *req, struct fw_rsp_hdr **hdr, void **body)
 		free(buf);
 		return -EBADMSG;
 	}
-	/* move the payload to the start of the buffer so free(*hdr) works */
-	memmove(buf, NLMSG_DATA(rnlh), NLMSG_PAYLOAD(rnlh, 0));
-	*hdr = (struct fw_rsp_hdr *)buf;
-	*body = buf + sizeof(struct fw_rsp_hdr);
-	return (*hdr)->type == FW_RSP_ERR ? (*hdr)->code : 0;
+	out = malloc(NLMSG_PAYLOAD(rnlh, 0));
+	if (!out) {
+		free(buf);
+		return -ENOMEM;
+	}
+	memcpy(out, NLMSG_DATA(rnlh), NLMSG_PAYLOAD(rnlh, 0));
+	free(buf);
+	err = ((struct fw_rsp_hdr *)out)->type == FW_RSP_ERR ? ((struct fw_rsp_hdr *)out)->code : 0;
+	if (hdr) {
+		*hdr = (struct fw_rsp_hdr *)out;
+		if (body)
+			*body = out + sizeof(struct fw_rsp_hdr);
+	} else {
+		free(out);
+	}
+	return err;
 }
